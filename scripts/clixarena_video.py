@@ -14,6 +14,8 @@ import urllib.request
 
 
 def mask(value):
+    if not value:
+        return
     escaped = value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
     if os.getenv('GITHUB_ACTIONS') == 'true':
         print('::add-mask::' + escaped, flush=True)
@@ -134,8 +136,11 @@ def main():
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
         for value in values.values():
             mask(value)
-        if not all(values.values()):
-            raise ValueError('Required URL, asset path or Streamtape secret is missing')
+        missing = [name for name, value in values.items() if not value.strip()]
+        if missing:
+            print('::error::Missing required configuration: ' + ', '.join(missing) +
+                  '. Set video/asset inputs and repository Actions secrets with these exact names.')
+            return 1
         for tool in ('ffmpeg', 'ffprobe', 'fc-scan', 'curl'):
             if not shutil.which(tool):
                 raise ValueError('Required media tool is missing')
