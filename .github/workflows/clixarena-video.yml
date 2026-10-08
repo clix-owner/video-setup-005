@@ -1,0 +1,51 @@
+name: CLIXARENA video encode and upload
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: Direct HTTPS video URL (inputs are visible to repository users)
+        required: true
+        type: string
+      subtitle_path:
+        description: Repository path to UTF-8 Sinhala SRT
+        default: subtitles/sinhala.srt
+        required: true
+        type: string
+      font_path:
+        description: Repository path to licensed Iskoola Pota TTF
+        default: fonts/IskoolaPota.ttf
+        required: true
+        type: string
+      rights_confirmed:
+        description: I have permission to process/upload this video, subtitles and font
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: clixarena-video
+  cancel-in-progress: false
+jobs:
+  encode:
+    if: ${{ inputs.rights_confirmed }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install media tools
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg fontconfig fonts-dejavu-core
+      - name: Download, validate, encode and upload
+        id: video
+        env:
+          VIDEO_URL: ${{ inputs.video_url }}
+          SUBTITLE_PATH: ${{ inputs.subtitle_path }}
+          FONT_PATH: ${{ inputs.font_path }}
+          STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
+          STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
+        run: python3 scripts/clixarena_video.py
+      - name: Failure guidance
+        if: failure()
+        run: echo '::error::Check the stage message above. Verify video URL, repository SRT/font paths, UTF-8 SRT, licensed Iskoola Pota font, disk space and Streamtape secrets. Uploads are not retried automatically; check your Streamtape account before rerunning.'
