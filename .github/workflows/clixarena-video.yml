@@ -16,11 +16,6 @@ on:
         default: fonts/IskoolaPota.ttf
         required: true
         type: string
-      rights_confirmed:
-        description: I have permission to process/upload this video, subtitles and font
-        required: true
-        default: false
-        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -28,7 +23,6 @@ concurrency:
   cancel-in-progress: false
 jobs:
   encode:
-    if: ${{ inputs.rights_confirmed }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
