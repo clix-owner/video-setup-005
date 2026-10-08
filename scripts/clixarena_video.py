@@ -83,6 +83,17 @@ def repository_file(root, value, suffix, limit):
     return path
 
 
+def output_filename(value):
+    name = value.strip()
+    if not name or name.startswith('.') or any(c in name for c in '/\\:"<>|?*') or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError('Invalid output filename')
+    if name.lower().endswith('.mp4'):
+        name = name[:-4]
+    if not name.strip() or len(name.encode('utf-8')) > 180:
+        raise ValueError('Output filename is empty or too long')
+    return name + '.mp4'
+
+
 def api(endpoint, values):
     # Credentials go in a POST body, not a URL or command line.
     data = urllib.parse.urlencode(values).encode()
@@ -91,7 +102,7 @@ def api(endpoint, values):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(req, timeout=60) as response:
         body = json.loads(response.read(1024 * 1024))
-    if body.get('status') != 200 or not isinstance(body.get('result'), dict):
+    if body.get('status') != 200 or not (isinstance(body.get('result'), dict) or body.get('result') is True):
         raise ValueError('Streamtape API rejected the request')
     return body['result']
 
@@ -144,6 +155,8 @@ def main():
         for tool in ('ffmpeg', 'ffprobe', 'fc-scan', 'curl'):
             if not shutil.which(tool):
                 raise ValueError('Required media tool is missing')
+        stage = 'output filename validation'
+        output_name = output_filename(os.getenv('OUTPUT_NAME', 'CLIXARENA.mp4'))
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
         srt_path = repository_file(root, values['SUBTITLE_PATH'], '.srt', 10 * 1024**2)
@@ -191,6 +204,12 @@ def main():
                 stage = 'Streamtape upload'
                 print('Uploading encoded MP4 to Streamtape', flush=True)
                 file_id = upload(Path('clixarena.mp4'), values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
+                stage = 'Streamtape filename update'
+                # Keep user names out of shell, FFmpeg paths and curl form syntax.
+                renamed = api('file/rename', {'login': values['STREAMTAPE_LOGIN'],
+                              'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
+                if renamed is not True:
+                    raise ValueError('Streamtape filename update failed')
                 link = 'https://streamtape.com/v/' + file_id
                 print('Upload verified: ' + link)
                 if os.getenv('GITHUB_OUTPUT'):

@@ -4,6 +4,8 @@ Copy `.github/workflows/clixarena-video.yml`, `scripts/clixarena_video.py` and t
 
 Under Settings > Secrets and variables > Actions, create repository secrets `STREAMTAPE_LOGIN` and `STREAMTAPE_KEY`. Never put their values in YAML, code, dispatch inputs or screenshots.
 
+Set `output_name` on Run workflow to your desired filename, for example `My Movie 2026.mp4`. The `.mp4` suffix is added if omitted. Sinhala names and spaces are supported; path separators, control characters and invalid filename characters are rejected. After direct upload and verification, the workflow renames the video through Streamtape's `/file/rename` API using an encoded POST body. The temporary runner file uses a fixed name for safety. If renaming fails, the upload already exists in Streamtape: check your account and rename it there instead of rerunning and creating a duplicate.
+
 Upload your Unicode UTF-8 Sinhala SRT as `subtitles/sinhala.srt` and your licensed Iskoola Pota TTF as `fonts/IskoolaPota.ttf`. Those files must exist on the branch selected for the run. The package includes neither a font nor a subtitle. Only commit a proprietary font if its license permits repository redistribution, especially for public repositories.
 
 Open Actions > CLIXARENA video encode and upload > Run workflow. Provide the direct HTTPS video URL. Keep the default `subtitle_path` and `font_path`, or enter your actual repository paths (case-sensitive on Linux), then click Run workflow. No run is triggered by uploading these files. Missing assets, paths outside the checkout, invalid family, non-Sinhala/invalid subtitle or missing secrets fails before downloading the video. Assets are copied to fixed temporary paths before FFmpeg runs.

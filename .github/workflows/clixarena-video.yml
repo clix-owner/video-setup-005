@@ -6,6 +6,11 @@ on:
         description: Direct HTTPS video URL (inputs are visible to repository users)
         required: true
         type: string
+      output_name:
+        description: Video filename (with or without .mp4)
+        required: true
+        default: CLIXARENA.mp4
+        type: string
       subtitle_path:
         description: Repository path to UTF-8 Sinhala SRT
         default: subtitles/sinhala.srt
@@ -35,6 +40,7 @@ jobs:
         id: video
         env:
           VIDEO_URL: ${{ inputs.video_url }}
+          OUTPUT_NAME: ${{ inputs.output_name }}
           SUBTITLE_PATH: ${{ inputs.subtitle_path }}
           FONT_PATH: ${{ inputs.font_path }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
