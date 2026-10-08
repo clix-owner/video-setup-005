@@ -1,5 +1,11 @@
 # Manual CLIXARENA video workflow
 
+## Preview before full encoding
+
+`sample_only` is checked by default on Run workflow. It encodes up to the first 180 seconds using the same subtitles and watermark, then publishes `preview/sample.mp4` as the `CLIXARENA-sample` run artifact (retained 3 days). Open the completed run's Summary, scroll to Artifacts, download and extract CLIXARENA-sample, then play sample.mp4. Inspect Sinhala text from 01:18 for the supplied subtitle file. Streamtape secrets are not required for sample mode and nothing is uploaded to Streamtape. The full source video is still downloaded; this option saves encoding time, not download bandwidth. The sample is accessible to people with run artifact access.
+
+After inspecting the sample, start another manual run with `sample_only` unchecked to encode and upload the full video. No run is started automatically.
+
 Copy `.github/workflows/clixarena-video.yml`, `scripts/clixarena_video.py` and this document into the repository, preserving paths. Merge the workflow into the default branch so the Run workflow button appears. This package was prepared without repository access; check for existing files and repository instructions before merging.
 
 Under Settings > Secrets and variables > Actions, create repository secrets `STREAMTAPE_LOGIN` and `STREAMTAPE_KEY`. Never put their values in YAML, code, dispatch inputs or screenshots.

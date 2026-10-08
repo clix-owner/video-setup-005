@@ -145,9 +145,11 @@ def main():
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
+        sample_only = os.getenv('SAMPLE_ONLY', 'false').lower() == 'true'
         for value in values.values():
             mask(value)
-        missing = [name for name, value in values.items() if not value.strip()]
+        required = ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH') if sample_only else tuple(values)
+        missing = [name for name in required if not values[name].strip()]
         if missing:
             print('::error::Missing required configuration: ' + ', '.join(missing) +
                   '. Set video/asset inputs and repository Actions secrets with these exact names.')
@@ -194,13 +196,25 @@ def main():
                          '-i', 'source.video', '-map', '0:v:0', '-map', '0:a:0?',
                          '-vf', filters, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
                          '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
-                         '-movflags', '+faststart', 'clixarena.mp4'], timeout=16000)
+                         '-movflags', '+faststart'] + (['-t', '180'] if sample_only else []) +
+                        ['clixarena.mp4'], timeout=16000)
                 output = probe('clixarena.mp4')
                 streams = output['streams']
                 if not any(s.get('codec_name') == 'h264' for s in streams) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in streams):
                     raise ValueError('Encoded file has unexpected codecs')
-                if abs(float(source['format']['duration']) - float(output['format']['duration'])) > 2:
+                expected_duration = min(180, float(source['format']['duration'])) if sample_only else float(source['format']['duration'])
+                if abs(expected_duration - float(output['format']['duration'])) > 2:
                     raise ValueError('Encoded duration differs from source')
+                if sample_only:
+                    stage = 'sample export'
+                    preview = original / 'preview'
+                    preview.mkdir(exist_ok=True)
+                    shutil.copyfile('clixarena.mp4', preview / 'sample.mp4')
+                    print('Sample ready: download CLIXARENA-sample from this run artifacts. No Streamtape upload performed.')
+                    if os.getenv('GITHUB_STEP_SUMMARY'):
+                        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
+                            file.write('### 3-minute sample ready\nDownload **CLIXARENA-sample** from this run artifacts. Inspect subtitles from 01:18 and watermark. No Streamtape upload performed.\n')
+                    return 0
                 stage = 'Streamtape upload'
                 print('Uploading encoded MP4 to Streamtape', flush=True)
                 file_id = upload(Path('clixarena.mp4'), values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])

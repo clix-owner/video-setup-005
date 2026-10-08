@@ -11,6 +11,11 @@ on:
         required: true
         default: CLIXARENA.mp4
         type: string
+      sample_only:
+        description: Encode first 3 minutes for preview (no Streamtape upload)
+        required: true
+        default: true
+        type: boolean
       subtitle_path:
         description: Repository path to UTF-8 Sinhala SRT
         default: subtitles/sinhala.srt
@@ -41,11 +46,20 @@ jobs:
         env:
           VIDEO_URL: ${{ inputs.video_url }}
           OUTPUT_NAME: ${{ inputs.output_name }}
+          SAMPLE_ONLY: ${{ inputs.sample_only }}
           SUBTITLE_PATH: ${{ inputs.subtitle_path }}
           FONT_PATH: ${{ inputs.font_path }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
         run: python3 scripts/clixarena_video.py
+      - name: Downloadable sample
+        if: ${{ inputs.sample_only && success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: CLIXARENA-sample
+          path: preview/sample.mp4
+          if-no-files-found: error
+          retention-days: 3
       - name: Failure guidance
         if: failure()
         run: echo '::error::Check the stage message above. Verify video URL, repository SRT/font paths, UTF-8 SRT, licensed Iskoola Pota font, disk space and Streamtape secrets. Uploads are not retried automatically; check your Streamtape account before rerunning.'
