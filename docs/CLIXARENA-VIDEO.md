@@ -1,5 +1,9 @@
 # Manual CLIXARENA video workflow
 
+## Sinhala shaping
+
+Use the modern original Iskoola Pota font (the provided Windows copy is version 6.96), not the version 0.81 shown in the earlier font preview. This pipeline requires version 6 or newer plus Sinhala GSUB/GPOS shaping tables and reports the detected version. This minimum is a pipeline compatibility policy, not a claim that all older fonts fail. The SRT is converted to temporary ASS, preserving Unicode text, then rendered with explicit HarfBuzz complex shaping. A preflight verifies that the installed FFmpeg/libass has the complex shaper. The original SRT is unchanged. Inspect sample output before a full upload; the local render test uses Windows FFmpeg, while Actions uses Ubuntu FFmpeg.
+
 ## Preview before full encoding
 
 `sample_only` is checked by default on Run workflow. It encodes up to the first 180 seconds using the same subtitles and watermark, then publishes `preview/sample.mp4` as the `CLIXARENA-sample` run artifact (retained 3 days). Open the completed run's Summary, scroll to Artifacts, download and extract CLIXARENA-sample, then play sample.mp4. Inspect Sinhala text from 01:18 for the supplied subtitle file. Streamtape secrets are not required for sample mode and nothing is uploaded to Streamtape. The full source video is still downloaded; this option saves encoding time, not download bandwidth. The sample is accessible to people with run artifact access.
@@ -24,4 +28,4 @@ The runner holds downloads and output temporarily; no video/font artifacts are p
 
 Direct upload follows https://strtape.tech/api : POST credentials to `/file/ul`, stream the encoded file as multipart `file1` to the returned HTTPS upload URL, and verify `/file/info`. Raw API responses and exceptions are suppressed. Proprietary font licensing remains the operator's responsibility.
 
-Validation of the delivered package is offline only: syntax and mocked failure/success cases. No real GitHub Actions run, licensed-font rendering or Streamtape upload is performed.
+Validation includes syntax, mocked upload failure/success cases, and a local FFmpeg render of the supplied Sinhala SRT with the Windows Iskoola Pota 6.96 font and complex shaping. No real GitHub Actions run or Streamtape upload is performed. Ubuntu output still needs a sample check.

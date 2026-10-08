@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import tempfile
 import urllib.parse
@@ -94,6 +95,61 @@ def output_filename(value):
     return name + '.mp4'
 
 
+def validate_sinhala_font(path):
+    data = Path(path).read_bytes()
+    count = struct.unpack_from('>H', data, 4)[0]
+    tables = {}
+    for index in range(count):
+        tag, _, offset, size = struct.unpack_from('>4sIII', data, 12 + index * 16)
+        if offset + size > len(data):
+            raise ValueError('Truncated font')
+        tables[tag] = offset
+    for tag in (b'GSUB', b'GPOS'):
+        base = tables[tag]
+        scripts = base + struct.unpack_from('>H', data, base + 4)[0]
+        total = struct.unpack_from('>H', data, scripts)[0]
+        if not any(data[scripts + 2 + i * 6:scripts + 6 + i * 6] in (b'sinh', b'sin2') for i in range(total)):
+            raise ValueError('Font lacks Sinhala shaping tables')
+    base = tables[b'name']
+    _, total, strings = struct.unpack_from('>HHH', data, base)
+    versions = []
+    for index in range(total):
+        platform, _, _, name_id, length, offset = struct.unpack_from('>HHHHHH', data, base + 6 + index * 12)
+        if name_id == 5:
+            text = data[base + strings + offset:base + strings + offset + length].decode('utf-16-be' if platform in (0, 3) else 'latin1')
+            match = re.search(r'Version\s+(\d+(?:\.\d+)?)', text, re.I)
+            if match:
+                versions.append(float(match[1]))
+    if not versions or max(versions) < 6:
+        print('::error::Use a modern Iskoola Pota font (version 6 or later). The supplied Windows font is version 6.96; replace fonts/IskoolaPota.ttf. Older versions are not supported by this pipeline.')
+        raise ValueError('Unsupported Iskoola Pota version')
+    print('Iskoola Pota font version: ' + str(max(versions)), flush=True)
+
+
+def prepare_ass():
+    command(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+             '-sub_charenc', 'UTF-8', '-i', 'subtitles.srt', 'subtitles.ass'])
+    path = Path('subtitles.ass')
+    lines = path.read_text(encoding='utf-8-sig').splitlines()
+    fields = None
+    styles = False
+    for index, line in enumerate(lines):
+        if line.startswith('['):
+            styles = line == '[V4+ Styles]'
+        if styles and line.startswith('Format:'):
+            fields = [field.strip() for field in line.split(':', 1)[1].split(',')]
+        if styles and fields and line.startswith('Style:'):
+            values = line.split(':', 1)[1].strip().split(',')
+            settings = {'Fontname': 'Iskoola Pota', 'Fontsize': '22', 'Outline': '1',
+                        'Shadow': '0', 'MarginV': '24', 'Spacing': '0', 'Encoding': '1',
+                        'PrimaryColour': '&H00FFFFFF', 'SecondaryColour': '&H00FFFFFF',
+                        'OutlineColour': '&H00000000', 'BackColour': '&H00000000'}
+            for key, value in settings.items():
+                values[fields.index(key)] = value
+            lines[index] = 'Style: ' + ','.join(values)
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
 def api(endpoint, values):
     # Credentials go in a POST body, not a URL or command line.
     data = urllib.parse.urlencode(values).encode()
@@ -178,6 +234,16 @@ def main():
                 family = command(['fc-scan', '--format', '%{family}', 'fonts/iskoola.ttf'])
                 if 'Iskoola Pota' not in family.split(','):
                     raise ValueError('Font file does not identify as Iskoola Pota')
+                validate_sinhala_font('fonts/iskoola.ttf')
+                prepare_ass()
+                shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
+                    '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
+                    'ass=subtitles.ass:fontsdir=fonts:shaping=complex', '-frames:v', '1', '-f', 'null', '-'],
+                    capture_output=True, text=True, timeout=60)
+                if shaping_test.returncode or not re.search(r'HarfBuzz.*\(COMPLEX\)', shaping_test.stderr):
+                    print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
+                    raise ValueError('Complex shaping unavailable')
+                print('Sinhala rendering: HarfBuzz complex shaping enabled', flush=True)
                 stage = 'video download and validation'
                 print('Downloading video', flush=True)
                 download(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3)
@@ -189,7 +255,7 @@ def main():
                 stage = 'encoding'
                 print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)
                 filters = ("scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                           "subtitles=subtitles.srt:fontsdir=fonts:force_style='FontName=Iskoola Pota,FontSize=22,Outline=1,Shadow=0,MarginV=24',"
+                           "ass=subtitles.ass:fontsdir=fonts:shaping=complex,"
                            "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
                            "text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38")
                 command(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
