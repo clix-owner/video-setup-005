@@ -1,31 +1,59 @@
-# Manual CLIXARENA video workflow
+# CLIXARENA advanced workflow
 
-## Sinhala shaping
+Upload all ZIP contents to the repository root, preserving paths. Replace the workflow and BOTH Python scripts together. Files do not trigger a run; use Run workflow manually.
 
-Use the modern original Iskoola Pota font (the provided Windows copy is version 6.96), not the version 0.81 shown in the earlier font preview. This pipeline requires version 6 or newer plus Sinhala GSUB/GPOS shaping tables and reports the detected version. This minimum is a pipeline compatibility policy, not a claim that all older fonts fail. The SRT is converted to temporary ASS, preserving Unicode text, then rendered with explicit HarfBuzz complex shaping. A preflight verifies that the installed FFmpeg/libass has the complex shaper. The original SRT is unchanged. Inspect sample output before a full upload; the local render test uses Windows FFmpeg, while Actions uses Ubuntu FFmpeg.
+## Required files and secrets
 
-## Preview before full encoding
+- fonts/IskoolaPota.ttf: licensed modern Iskoola Pota (version 6+, locally tested with 6.96).
+- fonts/Algerian.ttf: licensed Algerian, needed when the title overlay is enabled.
+- subtitles/: use GitHub Add file > Upload files to drag-and-drop your UTF-8 Sinhala SRT, with ANY filename. Keep exactly one SRT for automatic selection; otherwise enter its repository path. It is copied to sinhala.srt in the runner, without modifying the repository.
+- Actions repository secrets: STREAMTAPE_LOGIN, STREAMTAPE_KEY, TMDB_READ_TOKEN. The latter is the TMDB API Read Access Token (not the short API key). Streamtape secrets are unnecessary in sample mode. TMDB token and Algerian are unnecessary when tmdb_url is blank.
 
-`sample_only` is checked by default on Run workflow. It encodes up to the first 180 seconds using the same subtitles and watermark, then publishes `preview/sample.mp4` as the `CLIXARENA-sample` run artifact (retained 3 days). Open the completed run's Summary, scroll to Artifacts, download and extract CLIXARENA-sample, then play sample.mp4. Inspect Sinhala text from 01:18 for the supplied subtitle file. Streamtape secrets are not required for sample mode and nothing is uploaded to Streamtape. The full source video is still downloaded; this option saves encoding time, not download bandwidth. The sample is accessible to people with run artifact access.
+No proprietary fonts are included. Only upload fonts where the license permits repository redistribution.
 
-After inspecting the sample, start another manual run with `sample_only` unchecked to encode and upload the full video. No run is started automatically.
+## Subtitle upload
 
-Copy `.github/workflows/clixarena-video.yml`, `scripts/clixarena_video.py` and this document into the repository, preserving paths. Merge the workflow into the default branch so the Run workflow button appears. This package was prepared without repository access; check for existing files and repository instructions before merging.
+Open subtitle-upload.html locally, drop your SRT, download the renamed sinhala.srt, then upload it to your repository's subtitles/ folder. This page sends nothing to a server and needs no token. Alternatively upload the original filename directly in GitHub: runner normalization handles it. GitHub's native Run workflow form cannot accept file attachments; file upload happens through the repository upload page.
 
-Under Settings > Secrets and variables > Actions, create repository secrets `STREAMTAPE_LOGIN` and `STREAMTAPE_KEY`. Never put their values in YAML, code, dispatch inputs or screenshots.
+## Inputs
 
-Set `output_name` on Run workflow to your desired filename, for example `My Movie 2026.mp4`. The `.mp4` suffix is added if omitted. Sinhala names and spaces are supported; path separators, control characters and invalid filename characters are rejected. After direct upload and verification, the workflow renames the video through Streamtape's `/file/rename` API using an encoded POST body. The temporary runner file uses a fixed name for safety. If renaming fails, the upload already exists in Streamtape: check your account and rename it there instead of rerunning and creating a duplicate.
+| Input | Behavior |
+| --- | --- |
+| video_url | Direct public HTTPS media URL; MP4 and MKV are supported. |
+| output_name | Streamtape filename; .mp4 is added if omitted. The name before .mp4 appears beneath the title logo. |
+| sample_only | Unchecked by default. Checked: first 180 seconds, downloadable sample, no Streamtape upload. |
+| subtitle_path | auto selects the only SRT in subtitles/, or provide an exact repository path. |
+| font_path | Defaults to fonts/IskoolaPota.ttf. |
+| quality | Original/1080p/720p with High (CRF 18) or Balanced (CRF 23). Original - High is default. No upscaling. |
+| audio_track | auto selects default or first audio; alternatively zero-based number or language tag such as eng. Available tracks appear in logs. Missing selections fail. |
+| tmdb_url | TMDB movie or TV series URL. Blank disables the timed title overlay. |
+| overlay_start | Start in seconds or HH:MM:SS, default 5. |
+| overlay_duration | Duration in seconds (4-60), default 8. |
 
-Upload your Unicode UTF-8 Sinhala SRT as `subtitles/sinhala.srt` and your licensed Iskoola Pota TTF as `fonts/IskoolaPota.ttf`. Those files must exist on the branch selected for the run. The package includes neither a font nor a subtitle. Only commit a proprietary font if its license permits repository redistribution, especially for public repositories.
+## Approved overlay
 
-Open Actions > CLIXARENA video encode and upload > Run workflow. Provide the direct HTTPS video URL. Keep the default `subtitle_path` and `font_path`, or enter your actual repository paths (case-sensitive on Linux), then click Run workflow. No run is triggered by uploading these files. Missing assets, paths outside the checkout, invalid family, non-Sinhala/invalid subtitle or missing secrets fails before downloading the video. Assets are copied to fixed temporary paths before FFmpeg runs.
+Only TMDB logos tagged English (en) are eligible. Highest pixel-count PNG wins, rating breaks ties. Download uses the original endpoint, never a thumbnail or lossy WebP conversion. Alpha-capable artwork is required. Proportional Lanczos downscaling fits it to the approved composition; logos are never enlarged past native pixels. Maximum artwork quality means the best English PNG currently available on TMDB, not unlimited resolution or lossless video encoding. Missing English artwork fails before the video download; other languages are never substituted.
 
-Dispatch inputs are retained by GitHub and accessible to repository users. Log masking does not make them secrets. Do not enter confidential signed video URLs here; use non-sensitive links, or adapt VIDEO_URL to a repository secret for confidential sources. Downloads validate public HTTPS hosts and each redirect; use trusted hosts (DNS validation alone is not a complete defense against DNS rebinding). No credentials are sent to input URLs. URLs and asset paths never enter shell expressions or FFmpeg filters.
+Centered logo fades in, filename beneath it appears in white Algerian italic and moves slightly upward, then the Sinhala message fades in. All fade out at the configured end. Word spaces are widened; line spacing follows the approved preview. No background rectangles or replacement backgrounds are applied: the original video remains visible. The small bottom-left CLIXARENA watermark remains throughout. HarfBuzz complex shaping renders the Sinhala subtitles. Names too long for the frame are reduced in size, and ASS commands in filenames are neutralized.
 
-The result is MP4 with H.264 (CRF 23, fast preset, yuv420p), AAC 128 kbps when audio exists, original resolution rounded to even dimensions, Iskoola Pota subtitles and a small bold bottom-left CLIXARENA watermark in DejaVu Sans Bold. Watermark opacity is 55%, font size is video height / 44, left margin is width / 136 and bottom margin is height / 38, approximating the supplied screenshot at different resolutions. Silent sources remain silent. Sinhala shaping should be visually checked on a short authorized sample before a full movie run.
+## Progress and results
 
-The runner holds downloads and output temporarily; no video/font artifacts are published to GitHub. The job has a 350-minute limit, a 12 GiB source limit and disk checks. Large/high-resolution videos can exceed hosted-runner storage or time; use a suitable runner or reduce source size. Downloads/API calls are bounded and uploads are not automatically retried, to avoid duplicate files. If an upload times out or verification fails, check Streamtape before rerunning. The success log and job summary show the verified file link; Streamtape playback processing can still be pending. Step outputs are `file_id` and `video_url`.
+Encoding reports percentage, elapsed time and estimated remaining minutes about every 20 seconds. Scene complexity affects estimates. Raw tool output, responses and exception strings are suppressed and never published as artifacts.
 
-Direct upload follows https://strtape.tech/api : POST credentials to `/file/ul`, stream the encoded file as multipart `file1` to the returned HTTPS upload URL, and verify `/file/info`. Raw API responses and exceptions are suppressed. Proprietary font licensing remains the operator's responsibility.
+Streamtape video URLs and IDs are not printed, placed in summaries or exported. Full runs report upload/rename verification status only (upload_verified=true); find the named file in your Streamtape file manager. No automatic upload retries: a timeout or failed rename can leave a file on the service, so check your account before rerunning. Playback processing may still be pending after successful upload.
 
-Validation includes syntax, mocked upload failure/success cases, and a local FFmpeg render of the supplied Sinhala SRT with the Windows Iskoola Pota 6.96 font and complex shaping. No real GitHub Actions run or Streamtape upload is performed. Ubuntu output still needs a sample check.
+Sample runs publish CLIXARENA-sample for three days. Download from the completed run's Artifacts section, extract and play sample.mp4. The entire source downloads again each run. Choose a title timestamp below 180 seconds to preview it. Check Sinhala shaping and synchronization before full encoding.
+
+## Limits and security
+
+Dispatch inputs are retained by GitHub. Masking does not make a URL secret: use non-sensitive video URLs, or configure VIDEO_URL from a repository secret for confidential links. Public HTTPS hosts and redirects are validated, but trusted sources are still necessary because DNS validation is not a complete DNS-rebinding defense. TMDB Bearer auth does not follow redirects; Streamtape auth uses POST bodies; upload URLs go to curl over stdin. Inputs never enter shell expressions.
+
+Hosted runners have limited time/storage. Source size cap is 12 GiB, disk reserve checks apply, job limit is 350 minutes, encode watchdog 16000 seconds, upload limit one hour. High resolution movies can still exceed runner resources. AAC audio is 192 kbps; silent sources remain silent. Streamtape can additionally process the H.264 MP4 output.
+
+## Attribution and validation
+
+TMDB movie images: https://developer.themoviedb.org/reference/movie-images
+TV images: https://developer.themoviedb.org/reference/tv-series-images
+This product uses the TMDB API but is not endorsed or certified by TMDB. Artwork is supplied by contributors. See https://developer.themoviedb.org/docs/faq for attribution and usage requirements.
+
+Validation includes local FFmpeg rendering/encoding and mocked API, selection and privacy checks. Local rendering uses Windows FFmpeg; Ubuntu behavior and live TMDB/Streamtape authentication still need a manual sample run. No real Actions run or upload was started while preparing the ZIP.

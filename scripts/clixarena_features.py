@@ -1,0 +1,215 @@
+"""Validated settings, English TMDB artwork, timed overlays and safe progress."""
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import time
+import urllib.parse
+import urllib.request
+
+
+def number(value, minimum, maximum, label):
+    result = float(value)
+    if not math.isfinite(result) or not minimum <= result <= maximum:
+        raise ValueError('Invalid ' + label)
+    return result
+
+
+def timestamp(value):
+    if re.fullmatch(r'\d{1,3}:\d{2}:\d{2}(?:\.\d+)?', value):
+        h, m, s = map(float, value.split(':'))
+        if m >= 60 or s >= 60:
+            raise ValueError('Timestamp minutes/seconds must be below 60')
+        return number(h * 3600 + m * 60 + s, 0, 86400, 'timestamp')
+    return number(value, 0, 86400, 'timestamp')
+
+
+def settings():
+    quality = os.getenv('QUALITY', 'Original - High')
+    choices = {'Original - High': (None, 18), '1080p - High': (1080, 18),
+               '720p - High': (720, 18), 'Original - Balanced': (None, 23),
+               '1080p - Balanced': (1080, 23), '720p - Balanced': (720, 23)}
+    if quality not in choices:
+        raise ValueError('Unsupported quality choice')
+    height, crf = choices[quality]
+    start = timestamp(os.getenv('OVERLAY_START', '5'))
+    duration = number(os.getenv('OVERLAY_DURATION', '8'), 4, 60, 'overlay duration')
+    return {'height': height, 'crf': crf, 'start': start, 'duration': duration,
+            'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
+            'tmdb': os.getenv('TMDB_URL', '').strip()}
+
+
+def subtitle_asset(root, value):
+    if value != 'auto':
+        from clixarena_video import repository_file
+        return repository_file(root, value, '.srt', 10 * 1024**2)
+    folder = (root / 'subtitles').resolve()
+    if not folder.is_relative_to(root.resolve()):
+        raise ValueError('Subtitle folder escapes repository')
+    files = sorted(p for p in folder.glob('*') if p.is_file() and p.suffix.lower() == '.srt')
+    if len(files) != 1:
+        print('::error::For subtitle_path=auto, keep exactly one SRT in subtitles/. Upload any filename using Add file > Upload files, or specify its exact repository path.')
+        raise ValueError('Ambiguous or missing subtitle')
+    from clixarena_video import repository_file
+    return repository_file(root, str(files[0].relative_to(root)), '.srt', 10 * 1024**2)
+
+
+def audio_selection(streams, choice):
+    tracks = [s for s in streams if s.get('codec_type') == 'audio']
+    for i, track in enumerate(tracks):
+        language = track.get('tags', {}).get('language', 'und')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,20}', language):
+            language = 'und'
+        print(f'Audio track {i}: language={language}, channels={int(track.get("channels", 0))}')
+    if choice == 'auto':
+        index = next((i for i, t in enumerate(tracks) if t.get('disposition', {}).get('default')), 0)
+        return f'0:a:{index}' if tracks else '0:a:0?'
+    if re.fullmatch(r'\d+', choice):
+        index = int(choice)
+        if index < len(tracks):
+            return f'0:a:{index}'
+    elif re.fullmatch(r'[a-z]{2,3}', choice):
+        index = next((i for i, t in enumerate(tracks) if t.get('tags', {}).get('language') == choice), None)
+        if index is not None:
+            return f'0:a:{index}'
+    print('::error::Requested audio track is unavailable. Use one of the zero-based track numbers listed above, its language code (e.g. eng), or auto.')
+    raise ValueError('Audio selection unavailable')
+
+
+def select_logo(logos):
+    candidates = [item for item in logos if item.get('iso_639_1') == 'en'
+                  and re.fullmatch(r'/[A-Za-z0-9]+\.png', item.get('file_path', ''))
+                  and isinstance(item.get('width'), int) and isinstance(item.get('height'), int)
+                  and item['width'] > 0 and item['height'] > 0]
+    if not candidates:
+        print('::error::TMDB has no English PNG title logo for this title. No other-language artwork is substituted.')
+        raise ValueError('English logo unavailable')
+    return max(candidates, key=lambda i: (i['width'] * i['height'], i.get('vote_average', 0)))
+
+
+def fetch_logo(url, token, download):
+    parsed = urllib.parse.urlsplit(url)
+    match = re.fullmatch(r'/(movie|tv)/(\d+)(?:-[^/]*)?/?', parsed.path)
+    if parsed.scheme != 'https' or parsed.hostname not in ('www.themoviedb.org', 'themoviedb.org') or parsed.username or parsed.password or parsed.port or not match:
+        raise ValueError('Use a TMDB movie or TV series URL')
+    if not token:
+        print('::error::Set the TMDB_READ_TOKEN repository secret to your TMDB API Read Access Token.')
+        raise ValueError('TMDB token missing')
+    from clixarena_video import NoRedirect
+    kind, identifier = match.groups()
+    endpoint = f'https://api.themoviedb.org/3/{kind}/{identifier}/images?include_image_language=en'
+    req = urllib.request.Request(endpoint, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(req, timeout=60) as response:
+        body = json.loads(response.read(4 * 1024**2))
+    chosen = select_logo(body.get('logos', []))
+    download('https://image.tmdb.org/t/p/original' + chosen['file_path'], Path('title-logo.png'), 40 * 1024**2)
+    print(f'English title logo: original PNG, {chosen["width"]} x {chosen["height"]} (highest pixel count available)')
+
+
+def ass_time(seconds):
+    cs = round(seconds * 100)
+    return f'{cs // 360000}:{cs // 6000 % 60:02}:{cs // 100 % 60:02}.{cs % 100:02}'
+
+
+def ass_text(text):
+    # User filenames cannot inject ASS override commands, line breaks or formatting.
+    text = text.replace('\\', '＼').replace('{', '｛').replace('}', '｝')
+    return re.sub(r' +', r'\\h\\h', text)
+
+
+def write_intro(name, start, duration):
+    styles = '''[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Name,Algerian,54,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,-1,0,0,100,100,0,0,1,0.5,0,5,90,90,0,1
+Style: Message,Iskoola Pota,36,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,5,90,90,0,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+'''
+    # Scale entrance delays for short custom durations; the center composition matches preview.
+    delay = min(1.1, duration / 6)
+    message_delay = min(1.9, duration / 3)
+    available_width = 1740
+    # Conservative fit for long names, including Algerian capitals.
+    size = min(54, max(8, available_width / max(len(name) * 0.8, 1)))
+    events = f'Dialogue: 0,{ass_time(start + delay)},{ass_time(start + duration)},Name,,0,0,0,,{{\\move(960,540,960,510,0,900)\\fad(900,1000)\\fs{size:.1f}}}{ass_text(name)}\n'
+    message = ass_text('සිංහල උපසිරැසි සමග චිත්‍රපට/රූපවාහිනී කතාමාලා') + r'\N' + ass_text('online නැරඹීමට පිවිසෙන්න')
+    events += f'Dialogue: 0,{ass_time(start + message_delay)},{ass_time(start + duration)},Message,,0,0,0,,{{\\pos(960,600)\\fad(1000,1000)}}{message}\n'
+    Path('intro.ass').write_text(styles + events, encoding='utf-8')
+
+
+def video_dimensions(stream, height):
+    width, source_height = int(stream['width']), int(stream['height'])
+    # Apply display rotation and sample aspect ratio before creating a square-pixel canvas.
+    rotation = next((int(side.get('rotation', 0)) for side in stream.get('side_data_list', []) if 'rotation' in side), 0)
+    sar = stream.get('sample_aspect_ratio', '1:1')
+    if re.fullmatch(r'\d+:\d+', sar) and int(sar.split(':')[1]):
+        a, b = map(int, sar.split(':'))
+        width = round(width * a / b)
+    if rotation % 180:
+        width, source_height = source_height, width
+    factor = min(1, height / source_height) if height else 1
+    return max(2, int(width * factor) // 2 * 2), max(2, int(source_height * factor) // 2 * 2)
+
+
+def filter_graph(width, height, options, logo_size=None):
+    base = f'[0:v:0]scale={width}:{height}:flags=lanczos,setsar=1,ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
+    base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'
+    if not logo_size:
+        return base + '[video]'
+    lw, lh = logo_size
+    # Never enlarge artwork beyond native pixels. Fit within preview's logo area.
+    ratio = min(1, width * 920 / 1920 / lw, height * 180 / 1080 / lh)
+    logo_width, logo_height = max(1, round(lw * ratio)), max(1, round(lh * ratio))
+    start, duration = options['start'], options['duration']
+    fade_in = min(1, duration / 4)
+    fade_out = start + duration - 1
+    graph = base + '[base];'
+    graph += (f'[1:v]scale={logo_width}:{logo_height}:flags=lanczos,format=rgba,'
+              f'fade=t=in:st={start}:d={fade_in}:alpha=1,fade=t=out:st={fade_out}:d=1:alpha=1[logo];'
+              f"[base][logo]overlay=x=(W-w)/2:y=H*410/1080-h/2:enable='between(t,{start},{start+duration})':eof_action=pass[art];"
+              '[art]ass=intro.ass:fontsdir=fonts:shaping=complex[video]')
+    return graph
+
+
+def encode_progress(args, duration, timeout=16000):
+    started = time.monotonic()
+    last_report = 0
+    with open('encode-private.log', 'w', encoding='utf-8') as errors:
+        process = subprocess.Popen(args + ['-progress', 'pipe:1', '-nostats', 'clixarena.mp4'],
+                                   stdout=subprocess.PIPE, stderr=errors, text=True)
+        # A watchdog bounds even an encoder that stops emitting progress.
+        import threading
+        timer = threading.Timer(timeout, process.kill)
+        timer.start()
+        try:
+            for line in process.stdout:
+                if not line.startswith('out_time_us='):
+                    continue
+                try:
+                    seconds = max(0, int(line.partition('=')[2]) / 1000000)
+                except ValueError:
+                    continue
+                elapsed = time.monotonic() - started
+                if elapsed - last_report < 20:
+                    continue
+                last_report = elapsed
+                percent = min(99.9, seconds / duration * 100)
+                remaining = max(0, (duration - seconds) / seconds * elapsed) if seconds else 0
+                print(f'Encoding {percent:.1f}% | elapsed {elapsed/60:.1f} min | estimated remaining {remaining/60:.1f} min', flush=True)
+            if process.wait():
+                print('::error::Encoder failed or exceeded its time limit. Private tool output is suppressed; check codec support, input integrity and disk space.')
+                raise ValueError('Encoding failed')
+            print('Encoding 100% complete', flush=True)
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                process.kill()
+                process.wait()

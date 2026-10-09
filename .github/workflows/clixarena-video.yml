@@ -1,4 +1,5 @@
 name: CLIXARENA video encode and upload
+run-name: CLIXARENA · ${{ inputs.output_name }} · ${{ inputs.job_id || inputs.subtitle_path }}
 on:
   workflow_dispatch:
     inputs:
@@ -14,17 +15,56 @@ on:
       sample_only:
         description: Encode first 3 minutes for preview (no Streamtape upload)
         required: true
-        default: true
+        default: false
         type: boolean
       subtitle_path:
-        description: Repository path to UTF-8 Sinhala SRT
-        default: subtitles/sinhala.srt
+        description: auto picks the only SRT uploaded to subtitles/ (any filename), or enter its path
+        default: auto
         required: true
         type: string
       font_path:
         description: Repository path to licensed Iskoola Pota TTF
         default: fonts/IskoolaPota.ttf
         required: true
+        type: string
+      quality:
+        description: Output resolution and quality (never upscales)
+        required: true
+        default: Original - High
+        type: choice
+        options:
+          - Original - High
+          - 1080p - High
+          - 720p - High
+          - Original - Balanced
+          - 1080p - Balanced
+          - 720p - Balanced
+      audio_track:
+        description: auto, zero-based track number (0, 1...), or language code (eng, hin...)
+        required: true
+        default: auto
+        type: string
+      tmdb_url:
+        description: TMDB movie/TV URL for English original logo (blank disables title overlay)
+        required: false
+        type: string
+      overlay_start:
+        description: Title animation start (seconds or HH:MM:SS)
+        required: true
+        default: '5'
+        type: string
+      overlay_duration:
+        description: Title animation duration in seconds (4 to 60)
+        required: true
+        default: '8'
+        type: string
+      source_commit:
+        description: Uploaded subtitle commit (set automatically by the Vercel page)
+        required: false
+        type: string
+      job_id:
+        description: Portal tracking ID (set automatically by the Vercel page)
+        required: false
         type: string
 permissions:
   contents: read
@@ -38,6 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ inputs.source_commit || github.sha }}
           persist-credentials: false
       - name: Install media tools
         run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg fontconfig fonts-dejavu-core
@@ -49,6 +90,12 @@ jobs:
           SAMPLE_ONLY: ${{ inputs.sample_only }}
           SUBTITLE_PATH: ${{ inputs.subtitle_path }}
           FONT_PATH: ${{ inputs.font_path }}
+          QUALITY: ${{ inputs.quality }}
+          AUDIO_TRACK: ${{ inputs.audio_track }}
+          TMDB_URL: ${{ inputs.tmdb_url }}
+          OVERLAY_START: ${{ inputs.overlay_start }}
+          OVERLAY_DURATION: ${{ inputs.overlay_duration }}
+          TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
         run: python3 scripts/clixarena_video.py

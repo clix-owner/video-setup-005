@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
+from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
+                                write_intro, video_dimensions, filter_graph, encode_progress)
 
 
 def mask(value):
@@ -202,6 +204,9 @@ def main():
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
         sample_only = os.getenv('SAMPLE_ONLY', 'false').lower() == 'true'
+        options = settings()
+        tmdb_token = os.getenv('TMDB_READ_TOKEN', '')
+        mask(tmdb_token)
         for value in values.values():
             mask(value)
         required = ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH') if sample_only else tuple(values)
@@ -217,16 +222,22 @@ def main():
         output_name = output_filename(os.getenv('OUTPUT_NAME', 'CLIXARENA.mp4'))
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
-        srt_path = repository_file(root, values['SUBTITLE_PATH'], '.srt', 10 * 1024**2)
+        srt_path = subtitle_asset(root, values['SUBTITLE_PATH'])
         font_path = repository_file(root, values['FONT_PATH'], '.ttf', 30 * 1024**2)
+        algerian_path = None
+        if options['tmdb']:
+            algerian_path = repository_file(root, 'fonts/Algerian.ttf', '.ttf', 30 * 1024**2)
         with tempfile.TemporaryDirectory(prefix='clixarena-') as directory:
             original = Path.cwd()
             os.chdir(directory)
             try:
                 stage = 'subtitle and font validation'
                 print('Checking subtitle and font', flush=True)
-                shutil.copyfile(srt_path, 'subtitles.srt')
-                subtitle = Path('subtitles.srt').read_text(encoding='utf-8-sig')
+                shutil.copyfile(srt_path, 'sinhala.srt')
+                # Every uploaded name is normalized in the runner, without changing repository files.
+                shutil.copyfile('sinhala.srt', 'subtitles.srt')
+                print('Subtitle loaded as sinhala.srt', flush=True)
+                subtitle = Path('sinhala.srt').read_text(encoding='utf-8-sig')
                 if not re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', subtitle) or not re.search('[\u0d80-\u0dff]', subtitle):
                     raise ValueError('SRT must contain valid timestamps and Unicode Sinhala text')
                 Path('fonts').mkdir()
@@ -235,6 +246,11 @@ def main():
                 if 'Iskoola Pota' not in family.split(','):
                     raise ValueError('Font file does not identify as Iskoola Pota')
                 validate_sinhala_font('fonts/iskoola.ttf')
+                if algerian_path:
+                    shutil.copyfile(algerian_path, 'fonts/algerian.ttf')
+                    if 'Algerian' not in command(['fc-scan', '--format', '%{family}', 'fonts/algerian.ttf']).split(','):
+                        print('::error::fonts/Algerian.ttf must be the Algerian font. No font substitution is used.')
+                        raise ValueError('Invalid Algerian font')
                 prepare_ass()
                 shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
                     '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
@@ -244,6 +260,16 @@ def main():
                     print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
                     raise ValueError('Complex shaping unavailable')
                 print('Sinhala rendering: HarfBuzz complex shaping enabled', flush=True)
+                logo_size = None
+                if options['tmdb']:
+                    stage = 'English TMDB original logo'
+                    fetch_logo(options['tmdb'], tmdb_token, download)
+                    logo_info = probe('title-logo.png')['streams'][0]
+                    if logo_info.get('pix_fmt') not in ('rgba', 'bgra', 'argb', 'abgr', 'yuva420p', 'pal8'):
+                        print('::error::Selected English logo lacks an alpha channel. Choose different artwork before encoding.')
+                        raise ValueError('Nontransparent artwork')
+                    logo_size = (int(logo_info['width']), int(logo_info['height']))
+                    write_intro(output_name[:-4], options['start'], options['duration'])
                 stage = 'video download and validation'
                 print('Downloading video', flush=True)
                 download(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3)
@@ -252,23 +278,30 @@ def main():
                     raise ValueError('Source has no video stream')
                 if shutil.disk_usage('.').free < Path('source.video').stat().st_size * 2 + 2 * 1024**3:
                     raise ValueError('Insufficient disk space for encoding')
+                source_duration = float(source['format']['duration'])
+                expected_duration = min(180, source_duration) if sample_only else source_duration
+                stage = 'audio and quality selection'
+                audio_map = audio_selection(source['streams'], options['audio'])
+                video_stream = next(s for s in source['streams'] if s['codec_type'] == 'video')
+                width, height = video_dimensions(video_stream, options['height'])
+                print(f'Output {width} x {height}, H.264 CRF {options["crf"]}', flush=True)
+                if logo_size and options['start'] >= expected_duration:
+                    print('::warning::Title timestamp is outside this encode. It will not appear; choose a timestamp within the sample/full video duration.')
                 stage = 'encoding'
                 print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)
-                filters = ("scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                           "ass=subtitles.ass:fontsdir=fonts:shaping=complex,"
-                           "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-                           "text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38")
-                command(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-                         '-i', 'source.video', '-map', '0:v:0', '-map', '0:a:0?',
-                         '-vf', filters, '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
-                         '-movflags', '+faststart'] + (['-t', '180'] if sample_only else []) +
-                        ['clixarena.mp4'], timeout=16000)
+                filters = filter_graph(width, height, options, logo_size)
+                inputs = ['-i', 'source.video']
+                if logo_size:
+                    inputs += ['-loop', '1', '-framerate', '30', '-i', 'title-logo.png']
+                encode_progress(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y'] + inputs +
+                         ['-map', '[video]', '-map', audio_map, '-filter_complex', filters,
+                         '-c:v', 'libx264', '-preset', 'fast', '-crf', str(options['crf']),
+                         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+                         '-t', str(expected_duration), '-movflags', '+faststart'], expected_duration)
                 output = probe('clixarena.mp4')
                 streams = output['streams']
                 if not any(s.get('codec_name') == 'h264' for s in streams) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in streams):
                     raise ValueError('Encoded file has unexpected codecs')
-                expected_duration = min(180, float(source['format']['duration'])) if sample_only else float(source['format']['duration'])
                 if abs(expected_duration - float(output['format']['duration'])) > 2:
                     raise ValueError('Encoded duration differs from source')
                 if sample_only:
@@ -290,14 +323,19 @@ def main():
                               'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
                 if renamed is not True:
                     raise ValueError('Streamtape filename update failed')
-                link = 'https://streamtape.com/v/' + file_id
-                print('Upload verified: ' + link)
+                verified = api('file/info', {'login': values['STREAMTAPE_LOGIN'],
+                               'key': values['STREAMTAPE_KEY'], 'file': file_id}).get(file_id, {})
+                if verified.get('status') != 200 or verified.get('name') != output_name:
+                    print('::error::Upload exists but final filename could not be verified. Check Streamtape before rerunning.')
+                    raise ValueError('Final filename verification failed')
+                # Do not construct, print, summarize or export a Streamtape video URL/ID.
+                print('Upload and filename verified. Find the video in your Streamtape file manager.')
                 if os.getenv('GITHUB_OUTPUT'):
                     with open(os.environ['GITHUB_OUTPUT'], 'a') as file:
-                        file.write('file_id=' + file_id + '\nvideo_url=' + link + '\n')
+                        file.write('upload_verified=true\n')
                 if os.getenv('GITHUB_STEP_SUMMARY'):
                     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
-                        file.write('### Upload verified\n[Open video](' + link + ')\n\nStreamtape may still be processing playback.\n')
+                        file.write('### Upload and filename verified\nFind the video in your Streamtape file manager. Video URLs and file IDs are not included in logs, summaries or outputs. Playback processing may still be pending.\n')
             finally:
                 os.chdir(original)
     except Exception:
