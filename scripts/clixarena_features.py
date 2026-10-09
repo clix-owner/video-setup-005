@@ -36,7 +36,16 @@ def settings():
     height, crf = choices[quality]
     start = timestamp(os.getenv('OVERLAY_START', '5'))
     duration = number(os.getenv('OVERLAY_DURATION', '8'), 4, 60, 'overlay duration')
-    return {'height': height, 'crf': crf, 'start': start, 'duration': duration,
+    active = os.getenv('TITLE_ANIMATION', str(bool(os.getenv('TMDB_URL')))).lower() == 'true'
+    parts = {}
+    for key in ('logo', 'name', 'message'):
+        value = os.getenv('SHOW_' + key.upper(), 'true').lower()
+        if value not in ('true', 'false'):
+            raise ValueError('Invalid overlay selection')
+        parts[key] = active and value == 'true'
+    if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
+        raise ValueError('TMDB URL required for enabled logo')
+    return {'parts': parts, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
             'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
@@ -120,7 +129,8 @@ def ass_text(text):
     return re.sub(r' +', r'\\h\\h', text)
 
 
-def write_intro(name, start, duration):
+def write_intro(name, start, duration, parts=None):
+    parts = parts or {'name': True, 'message': True}
     styles = '''[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
@@ -140,8 +150,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # Conservative fit for long names, including Algerian capitals.
     size = min(54, max(8, available_width / max(len(name) * 0.8, 1)))
     events = f'Dialogue: 0,{ass_time(start + delay)},{ass_time(start + duration)},Name,,0,0,0,,{{\\move(960,540,960,510,0,900)\\fad(900,1000)\\fs{size:.1f}}}{ass_text(name)}\n'
+    if not parts['name']:
+        events = ''
     message = ass_text('සිංහල උපසිරැසි සමග චිත්‍රපට/රූපවාහිනී කතාමාලා') + r'\N' + ass_text('online නැරඹීමට පිවිසෙන්න')
-    events += f'Dialogue: 0,{ass_time(start + message_delay)},{ass_time(start + duration)},Message,,0,0,0,,{{\\pos(960,600)\\fad(1000,1000)}}{message}\n'
+    if parts['message']:
+        events += f'Dialogue: 0,{ass_time(start + message_delay)},{ass_time(start + duration)},Message,,0,0,0,,{{\\pos(960,600)\\fad(1000,1000)}}{message}\n'
     Path('intro.ass').write_text(styles + events, encoding='utf-8')
 
 
@@ -162,8 +175,9 @@ def video_dimensions(stream, height):
 def filter_graph(width, height, options, logo_size=None):
     base = f'[0:v:0]scale={width}:{height}:flags=lanczos,setsar=1,ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
     base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'
+    text = any(options.get('parts', {'name': bool(logo_size), 'message': bool(logo_size)})[key] for key in ('name', 'message'))
     if not logo_size:
-        return base + '[video]'
+        return base + (',ass=intro.ass:fontsdir=fonts:shaping=complex' if text else '') + '[video]'
     lw, lh = logo_size
     # Never enlarge artwork beyond native pixels. Fit within preview's logo area.
     ratio = min(1, width * 920 / 1920 / lw, height * 180 / 1080 / lh)
@@ -175,7 +189,7 @@ def filter_graph(width, height, options, logo_size=None):
     graph += (f'[1:v]scale={logo_width}:{logo_height}:flags=lanczos,format=rgba,'
               f'fade=t=in:st={start}:d={fade_in}:alpha=1,fade=t=out:st={fade_out}:d=1:alpha=1[logo];'
               f"[base][logo]overlay=x=(W-w)/2:y=H*410/1080-h/2:enable='between(t,{start},{start+duration})':eof_action=pass[art];"
-              '[art]ass=intro.ass:fontsdir=fonts:shaping=complex[video]')
+              + ('[art]ass=intro.ass:fontsdir=fonts:shaping=complex[video]' if text else '[art]null[video]'))
     return graph
 
 

@@ -12,6 +12,10 @@ on:
         required: true
         default: CLIXARENA.mp4
         type: string
+      overlay_name:
+        description: Separate title shown in video (blank uses filename)
+        type: string
+        required: false
       sample_only:
         description: Encode first 3 minutes for preview (no Streamtape upload)
         required: true
@@ -48,6 +52,26 @@ on:
         description: TMDB movie/TV URL for English original logo (blank disables title overlay)
         required: false
         type: string
+      title_animation:
+        description: Enable title animation
+        type: boolean
+        default: true
+        required: true
+      show_logo:
+        description: Show English title logo (requires TMDB URL)
+        type: boolean
+        default: true
+        required: true
+      show_name:
+        description: Show output name
+        type: boolean
+        default: true
+        required: true
+      show_message:
+        description: Show Sinhala message
+        type: boolean
+        default: true
+        required: true
       overlay_start:
         description: Title animation start (seconds or HH:MM:SS)
         required: true
@@ -86,6 +110,7 @@ jobs:
         id: video
         env:
           VIDEO_URL: ${{ inputs.video_url }}
+          OVERLAY_NAME: ${{ inputs.overlay_name }}
           OUTPUT_NAME: ${{ inputs.output_name }}
           SAMPLE_ONLY: ${{ inputs.sample_only }}
           SUBTITLE_PATH: ${{ inputs.subtitle_path }}
@@ -93,6 +118,10 @@ jobs:
           QUALITY: ${{ inputs.quality }}
           AUDIO_TRACK: ${{ inputs.audio_track }}
           TMDB_URL: ${{ inputs.tmdb_url }}
+          TITLE_ANIMATION: ${{ inputs.title_animation }}
+          SHOW_LOGO: ${{ inputs.show_logo }}
+          SHOW_NAME: ${{ inputs.show_name }}
+          SHOW_MESSAGE: ${{ inputs.show_message }}
           OVERLAY_START: ${{ inputs.overlay_start }}
           OVERLAY_DURATION: ${{ inputs.overlay_duration }}
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}

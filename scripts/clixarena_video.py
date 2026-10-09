@@ -220,12 +220,15 @@ def main():
                 raise ValueError('Required media tool is missing')
         stage = 'output filename validation'
         output_name = output_filename(os.getenv('OUTPUT_NAME', 'CLIXARENA.mp4'))
+        overlay_name = os.getenv('OVERLAY_NAME', '').strip() or output_name[:-4]
+        if len(overlay_name.encode('utf-8')) > 500 or re.search(r'[\x00-\x1f\x7f]', overlay_name):
+            raise ValueError('Invalid display title')
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
         srt_path = subtitle_asset(root, values['SUBTITLE_PATH'])
         font_path = repository_file(root, values['FONT_PATH'], '.ttf', 30 * 1024**2)
         algerian_path = None
-        if options['tmdb']:
+        if options['parts']['name']:
             algerian_path = repository_file(root, 'fonts/Algerian.ttf', '.ttf', 30 * 1024**2)
         with tempfile.TemporaryDirectory(prefix='clixarena-') as directory:
             original = Path.cwd()
@@ -261,7 +264,7 @@ def main():
                     raise ValueError('Complex shaping unavailable')
                 print('Sinhala rendering: HarfBuzz complex shaping enabled', flush=True)
                 logo_size = None
-                if options['tmdb']:
+                if options['parts']['logo']:
                     stage = 'English TMDB original logo'
                     fetch_logo(options['tmdb'], tmdb_token, download)
                     logo_info = probe('title-logo.png')['streams'][0]
@@ -269,7 +272,8 @@ def main():
                         print('::error::Selected English logo lacks an alpha channel. Choose different artwork before encoding.')
                         raise ValueError('Nontransparent artwork')
                     logo_size = (int(logo_info['width']), int(logo_info['height']))
-                    write_intro(output_name[:-4], options['start'], options['duration'])
+                if options['parts']['name'] or options['parts']['message']:
+                    write_intro(overlay_name, options['start'], options['duration'], options['parts'])
                 stage = 'video download and validation'
                 print('Downloading video', flush=True)
                 download(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3)
@@ -285,7 +289,7 @@ def main():
                 video_stream = next(s for s in source['streams'] if s['codec_type'] == 'video')
                 width, height = video_dimensions(video_stream, options['height'])
                 print(f'Output {width} x {height}, H.264 CRF {options["crf"]}', flush=True)
-                if logo_size and options['start'] >= expected_duration:
+                if any(options['parts'].values()) and options['start'] >= expected_duration:
                     print('::warning::Title timestamp is outside this encode. It will not appear; choose a timestamp within the sample/full video duration.')
                 stage = 'encoding'
                 print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)

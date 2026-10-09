@@ -57,3 +57,7 @@ TV images: https://developer.themoviedb.org/reference/tv-series-images
 This product uses the TMDB API but is not endorsed or certified by TMDB. Artwork is supplied by contributors. See https://developer.themoviedb.org/docs/faq for attribution and usage requirements.
 
 Validation includes local FFmpeg rendering/encoding and mocked API, selection and privacy checks. Local rendering uses Windows FFmpeg; Ubuntu behavior and live TMDB/Streamtape authentication still need a manual sample run. No real Actions run or upload was started while preparing the ZIP.
+
+The title logo, output name and Sinhala message have independent switches, all enabled by default. The main switch disables all three. Only the logo needs TMDB; only the name needs Algerian. Update both workflow and Vercel files.
+
+File name and Title shown in video are separate editable fields, both filled from TMDB. TV titles support season and episode selection (including specials). Names use Series - Episode title, falling back to Series - Season-1 Episode-1 when the episode title is missing or generic. The workflow overlay_name input controls only the title on video; output_name controls the MP4 and Streamtape filename.
