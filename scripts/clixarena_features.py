@@ -58,7 +58,14 @@ def settings():
     message = layout.get('message', 'සිංහල උපසිරැසි සමග චිත්‍රපට/රූපවාහිනී කතාමාලා\nonline නැරඹීමට පිවිසෙන්න')
     if not isinstance(message, str) or len(message.encode('utf-8')) > 1500 or re.search(r'[\x00-\x09\x0b-\x1f\x7f]', message) or parts['message'] and not message.strip():
         raise ValueError('Invalid overlay message')
-    return {'layout': {'positions': positions, 'message': message}, 'parts': parts, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
+    styles = {}
+    for key, default in [('name', 54), ('message', 36)]:
+        style = layout.get('styles', {}).get(key, {})
+        color = style.get('color', '#FFFFFF')
+        if not isinstance(color, str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}', color):
+            raise ValueError('Invalid overlay text color')
+        styles[key] = {'size': number(style.get('size', default), 8, 160, 'overlay font size'), 'color': color.upper()}
+    return {'layout': {'positions': positions, 'message': message, 'styles': styles}, 'parts': parts, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
             'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
@@ -159,12 +166,25 @@ Style: Message,Iskoola Pota,36,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 '''
+    text_styles = (layout or {}).get('styles', {})
+    for key, label, default in [('name', 'Name', 54), ('message', 'Message', 36)]:
+        style = text_styles.get(key, {'size': default, 'color': '#FFFFFF'})
+        color = style['color'].lstrip('#')
+        ass_color = '&H00' + color[4:6] + color[2:4] + color[:2]
+        rows = styles.splitlines()
+        for index, row in enumerate(rows):
+            if row.startswith('Style: ' + label + ','):
+                fields = row.split(',')
+                fields[2] = str(style['size'])
+                fields[3] = fields[4] = ass_color
+                rows[index] = ','.join(fields)
+        styles = '\n'.join(rows) + '\n'
     # Scale entrance delays for short custom durations; the center composition matches preview.
     delay = min(1.1, duration / 6)
     message_delay = min(1.9, duration / 3)
     available_width = 1740
     # Conservative fit for long names, including Algerian capitals.
-    size = min(54, max(8, available_width / max(len(name) * 0.8, 1)))
+    size = min(text_styles.get('name', {}).get('size', 54), max(8, available_width / max(len(name) * 0.8, 1)))
     events = f'Dialogue: 0,{ass_time(start + delay)},{ass_time(start + duration)},Name,,0,0,0,,{{\\move({nx:.2f},{min(1050,ny+30):.2f},{nx:.2f},{ny:.2f},0,900)\\fad(900,1000)\\fs{size:.1f}}}{ass_text(name)}\n'
     if not parts['name']:
         events = ''

@@ -240,6 +240,26 @@ def soft_mp4_args(streams, audio_map, duration, crf):
     return args
 
 
+def complete_upload(path, output_name, values):
+    print('Uploading video to Streamtape', flush=True)
+    file_id = upload(path, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
+    # Keep user names out of shell, FFmpeg paths and curl form syntax.
+    renamed = api('file/rename', {'login': values['STREAMTAPE_LOGIN'],
+                  'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
+    if renamed is not True:
+        raise ValueError('Streamtape filename update failed')
+    filename_verified = verify_filename(file_id, output_name, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
+    if not filename_verified:
+        print('::warning::Upload verified and rename accepted, but the final filename could not be confirmed. Check the filename in Streamtape file manager; do not rerun just for this warning.')
+    # Do not construct, print, summarize or export a Streamtape video URL/ID.
+    print('Upload verified. Find the video in your Streamtape file manager.', flush=True)
+    if os.getenv('GITHUB_OUTPUT'):
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as file:
+            file.write('upload_verified=true\nrename_accepted=true\nfilename_verified=' + str(filename_verified).lower() + '\n')
+    if os.getenv('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
+            file.write('### Upload verified\nRename request accepted. Final filename ' + ('verified' if filename_verified else 'not confirmed; check it in Streamtape file manager. Do not re-upload solely for this warning') + '.\nFind the video in your Streamtape file manager. Video URLs and file IDs are not included in logs, summaries or outputs. Playback processing may still be pending.\n')
+
 def main():
     stage = 'preflight'
     try:
@@ -247,9 +267,9 @@ def main():
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
         sample_only = os.getenv('SAMPLE_ONLY', 'false').lower() == 'true'
         method = os.getenv('SUBTITLE_METHOD', 'burn')
-        if method not in ('burn', 'soft'):
+        if method not in ('burn', 'soft', 'transfer'):
             raise ValueError('Invalid subtitle method')
-        if method == 'soft':
+        if method != 'burn':
             os.environ['TITLE_ANIMATION'] = 'false'
         options = settings()
         tmdb_token = os.getenv('TMDB_READ_TOKEN', '')
@@ -259,6 +279,8 @@ def main():
         required = ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH') if sample_only else tuple(values)
         if method == 'soft':
             required = tuple(name for name in required if name != 'FONT_PATH')
+        if method == 'transfer':
+            required = ('VIDEO_URL', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')
         missing = [name for name in required if not values[name].strip()]
         if missing:
             print('::error::Missing required configuration: ' + ', '.join(missing) +
@@ -272,6 +294,30 @@ def main():
         overlay_name = os.getenv('OVERLAY_NAME', '').strip() or output_name[:-4]
         if len(overlay_name.encode('utf-8')) > 500 or re.search(r'[\x00-\x1f\x7f]', overlay_name):
             raise ValueError('Invalid display title')
+        if method == 'transfer':
+            stage = 'original video download and upload'
+            with tempfile.TemporaryDirectory(prefix='clixarena-transfer-') as directory:
+                original = Path.cwd()
+                os.chdir(directory)
+                try:
+                    print('Downloading original video; no subtitle or encoding step', flush=True)
+                    path = Path('transfer.video')
+                    download(values['VIDEO_URL'], path, 12 * 1024**3)
+                    info = probe(str(path))
+                    if not any(s.get('codec_type') == 'video' for s in info.get('streams', [])):
+                        raise ValueError('Source is not a video')
+                    formats = info.get('format', {}).get('format_name', '').split(',')
+                    if 'mp4' in formats:
+                        extension = '.mp4'
+                    elif 'matroska' in formats:
+                        extension = '.mkv'
+                    else:
+                        raise ValueError('Download-only method supports original MP4/MKV containers')
+                    stem = re.sub(r'\.(mp4|mkv)$', '', output_name, flags=re.I)
+                    complete_upload(path, stem + extension, values)
+                finally:
+                    os.chdir(original)
+            return 0
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
         srt_path = subtitle_asset(root, values['SUBTITLE_PATH'])
@@ -385,7 +431,6 @@ def main():
                     preview = original / 'preview'
                     preview.mkdir(exist_ok=True)
                     shutil.copyfile('sinhala.srt', preview / 'sinhala.srt')
-                    print('Sinhala-only MP4 track verified. Separate SRT is available in run artifacts for players that do not import embedded tracks.')
                 if sample_only:
                     stage = 'sample export'
                     preview = original / 'preview'
@@ -396,26 +441,8 @@ def main():
                         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
                             file.write('### 3-minute sample ready\nDownload **CLIXARENA-sample** from this run artifacts. Inspect subtitles from 01:18 and watermark. No Streamtape upload performed.\n')
                     return 0
-                stage = 'Streamtape upload'
-                print('Uploading encoded MP4 to Streamtape', flush=True)
-                file_id = upload(Path('clixarena.mp4'), values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
-                stage = 'Streamtape filename update'
-                # Keep user names out of shell, FFmpeg paths and curl form syntax.
-                renamed = api('file/rename', {'login': values['STREAMTAPE_LOGIN'],
-                              'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
-                if renamed is not True:
-                    raise ValueError('Streamtape filename update failed')
-                if not verify_filename(file_id, output_name, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY']):
-                    print('::error::Upload exists but final filename could not be verified. Check Streamtape before rerunning.')
-                    raise ValueError('Final filename verification failed')
-                # Do not construct, print, summarize or export a Streamtape video URL/ID.
-                print('Upload and filename verified. Find the video in your Streamtape file manager.')
-                if os.getenv('GITHUB_OUTPUT'):
-                    with open(os.environ['GITHUB_OUTPUT'], 'a') as file:
-                        file.write('upload_verified=true\n')
-                if os.getenv('GITHUB_STEP_SUMMARY'):
-                    with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
-                        file.write('### Upload and filename verified\nFind the video in your Streamtape file manager. Video URLs and file IDs are not included in logs, summaries or outputs. Playback processing may still be pending.\n')
+                stage = 'Streamtape upload and filename update'
+                complete_upload(Path('clixarena.mp4'), output_name, values)
             finally:
                 os.chdir(original)
     except Exception:

@@ -28,6 +28,7 @@ on:
         options:
           - burn
           - soft
+          - transfer
       sample_only:
         description: Encode first 3 minutes for preview (no Streamtape upload)
         required: true
