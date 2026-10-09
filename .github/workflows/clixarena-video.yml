@@ -20,6 +20,14 @@ on:
         description: Separate title shown in video (blank uses filename)
         type: string
         required: false
+      subtitle_method:
+        description: Burn or Sinhala-only switchable subtitles in MP4
+        required: true
+        type: choice
+        default: burn
+        options:
+          - burn
+          - soft
       sample_only:
         description: Encode first 3 minutes for preview (no Streamtape upload)
         required: true
@@ -122,6 +130,7 @@ jobs:
           OVERLAY_LAYOUT: ${{ inputs.overlay_layout }}
           OVERLAY_NAME: ${{ inputs.overlay_name }}
           OUTPUT_NAME: ${{ inputs.output_name }}
+          SUBTITLE_METHOD: ${{ inputs.subtitle_method }}
           SAMPLE_ONLY: ${{ inputs.sample_only }}
           SUBTITLE_PATH: ${{ inputs.subtitle_path }}
           FONT_PATH: ${{ inputs.font_path }}
@@ -145,6 +154,14 @@ jobs:
         with:
           name: CLIXARENA-sample
           path: preview/sample.mp4
+          if-no-files-found: error
+          retention-days: 3
+      - name: Sinhala subtitle companion
+        if: ${{ inputs.subtitle_method == 'soft' && success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: CLIXARENA-Sinhala-subtitle
+          path: preview/sinhala.srt
           if-no-files-found: error
           retention-days: 3
       - name: Failure guidance

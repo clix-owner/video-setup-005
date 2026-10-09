@@ -215,18 +215,50 @@ def verify_filename(file_id, output_name, login, key, attempts=6, pause=time.sle
     return False
 
 
+def soft_mp4_args(streams, audio_map, duration, crf):
+    video = next(s for s in streams if s.get('codec_type') == 'video')
+    args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+            '-i', 'source.video', '-sub_charenc', 'UTF-8', '-i', 'sinhala.srt',
+            '-map', '0:v:0', '-map', audio_map, '-map', '1:s:0',
+            '-map_metadata', '-1', '-map_chapters', '-1']
+    if video.get('codec_name') == 'h264':
+        print('H.264 video: copying without re-encoding', flush=True)
+        args += ['-c:v', 'copy']
+    else:
+        print('Source video is not H.264: converting video to H.264', flush=True)
+        args += ['-c:v', 'libx264', '-preset', 'fast', '-crf', str(crf), '-pix_fmt', 'yuv420p']
+    audio = [s for s in streams if s.get('codec_type') == 'audio']
+    if audio_map.endswith('?') and not audio:
+        pass
+    else:
+        index = int(audio_map.split(':')[-1].rstrip('?'))
+        selected = audio[index]
+        args += ['-c:a', 'copy'] if selected.get('codec_name') == 'aac' else ['-c:a', 'aac', '-b:a', '192k']
+    args += ['-c:s', 'mov_text', '-metadata:s:s:0', 'language=sin',
+             '-metadata:s:s:0', 'title=Sinhala', '-disposition:s:0', '0',
+             '-t', str(duration), '-movflags', '+faststart']
+    return args
+
+
 def main():
     stage = 'preflight'
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
         sample_only = os.getenv('SAMPLE_ONLY', 'false').lower() == 'true'
+        method = os.getenv('SUBTITLE_METHOD', 'burn')
+        if method not in ('burn', 'soft'):
+            raise ValueError('Invalid subtitle method')
+        if method == 'soft':
+            os.environ['TITLE_ANIMATION'] = 'false'
         options = settings()
         tmdb_token = os.getenv('TMDB_READ_TOKEN', '')
         mask(tmdb_token)
         for value in values.values():
             mask(value)
         required = ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH') if sample_only else tuple(values)
+        if method == 'soft':
+            required = tuple(name for name in required if name != 'FONT_PATH')
         missing = [name for name in required if not values[name].strip()]
         if missing:
             print('::error::Missing required configuration: ' + ', '.join(missing) +
@@ -243,7 +275,7 @@ def main():
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
         srt_path = subtitle_asset(root, values['SUBTITLE_PATH'])
-        font_path = repository_file(root, values['FONT_PATH'], '.ttf', 30 * 1024**2)
+        font_path = repository_file(root, values['FONT_PATH'], '.ttf', 30 * 1024**2) if method == 'burn' else None
         algerian_path = None
         if options['parts']['name']:
             algerian_path = repository_file(root, 'fonts/Algerian.ttf', '.ttf', 30 * 1024**2)
@@ -260,26 +292,27 @@ def main():
                 subtitle = Path('sinhala.srt').read_text(encoding='utf-8-sig')
                 if not re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', subtitle) or not re.search('[\u0d80-\u0dff]', subtitle):
                     raise ValueError('SRT must contain valid timestamps and Unicode Sinhala text')
-                Path('fonts').mkdir()
-                shutil.copyfile(font_path, 'fonts/iskoola.ttf')
-                family = command(['fc-scan', '--format', '%{family}', 'fonts/iskoola.ttf'])
-                if 'Iskoola Pota' not in family.split(','):
-                    raise ValueError('Font file does not identify as Iskoola Pota')
-                validate_sinhala_font('fonts/iskoola.ttf')
-                if algerian_path:
-                    shutil.copyfile(algerian_path, 'fonts/algerian.ttf')
-                    if 'Algerian' not in command(['fc-scan', '--format', '%{family}', 'fonts/algerian.ttf']).split(','):
-                        print('::error::fonts/Algerian.ttf must be the Algerian font. No font substitution is used.')
-                        raise ValueError('Invalid Algerian font')
-                prepare_ass()
-                shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
-                    '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
-                    'ass=subtitles.ass:fontsdir=fonts:shaping=complex', '-frames:v', '1', '-f', 'null', '-'],
-                    capture_output=True, text=True, timeout=60)
-                if shaping_test.returncode or not re.search(r'HarfBuzz.*\(COMPLEX\)', shaping_test.stderr):
-                    print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
-                    raise ValueError('Complex shaping unavailable')
-                print('Sinhala rendering: HarfBuzz complex shaping enabled', flush=True)
+                if method == 'burn':
+                    Path('fonts').mkdir()
+                    shutil.copyfile(font_path, 'fonts/iskoola.ttf')
+                    family = command(['fc-scan', '--format', '%{family}', 'fonts/iskoola.ttf'])
+                    if 'Iskoola Pota' not in family.split(','):
+                        raise ValueError('Font file does not identify as Iskoola Pota')
+                    validate_sinhala_font('fonts/iskoola.ttf')
+                    if algerian_path:
+                        shutil.copyfile(algerian_path, 'fonts/algerian.ttf')
+                        if 'Algerian' not in command(['fc-scan', '--format', '%{family}', 'fonts/algerian.ttf']).split(','):
+                            print('::error::fonts/Algerian.ttf must be the Algerian font. No font substitution is used.')
+                            raise ValueError('Invalid Algerian font')
+                    prepare_ass()
+                    shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
+                        '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
+                        'ass=subtitles.ass:fontsdir=fonts:shaping=complex', '-frames:v', '1', '-f', 'null', '-'],
+                        capture_output=True, text=True, timeout=60)
+                    if shaping_test.returncode or not re.search(r'HarfBuzz.*\(COMPLEX\)', shaping_test.stderr):
+                        print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
+                        raise ValueError('Complex shaping unavailable')
+                    print('Sinhala rendering: HarfBuzz complex shaping enabled', flush=True)
                 logo_size = None
                 if options['parts']['logo']:
                     stage = 'English TMDB original logo'
@@ -321,24 +354,38 @@ def main():
                     print(f'Logo prepared once at {display_width} x {display_height}; animation input ends after its display window', flush=True)
                 else:
                     logo_size = None
-                stage = 'encoding'
-                print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)
-                filters = filter_graph(width, height, options, logo_size)
-                inputs = ['-i', 'source.video']
-                if logo_size:
-                    inputs += ['-itsoffset', str(options['start']), '-loop', '1', '-framerate', '30',
-                               '-t', str(logo_input_duration), '-i', 'title-logo-display.png']
-                encode_progress(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y'] + inputs +
-                         ['-map', '[video]', '-map', audio_map, '-filter_complex', filters,
-                         '-c:v', 'libx264', '-preset', 'fast', '-crf', str(options['crf']),
-                         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
-                         '-t', str(expected_duration), '-movflags', '+faststart'], expected_duration)
+                if method == 'soft':
+                    stage = 'MP4 with Sinhala-only switchable subtitles'
+                    args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'])
+                    print('Preparing MP4 with one Sinhala subtitle track; removing all source subtitle tracks', flush=True)
+                    encode_progress(args, expected_duration)
+                else:
+                    stage = 'encoding'
+                    print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)
+                    filters = filter_graph(width, height, options, logo_size)
+                    inputs = ['-i', 'source.video']
+                    if logo_size:
+                        inputs += ['-itsoffset', str(options['start']), '-loop', '1', '-framerate', '30',
+                                   '-t', str(logo_input_duration), '-i', 'title-logo-display.png']
+                    encode_progress(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y'] + inputs +
+                             ['-map', '[video]', '-map', audio_map, '-filter_complex', filters,
+                             '-c:v', 'libx264', '-preset', 'fast', '-crf', str(options['crf']),
+                             '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+                             '-t', str(expected_duration), '-movflags', '+faststart'], expected_duration)
                 output = probe('clixarena.mp4')
                 streams = output['streams']
                 if not any(s.get('codec_name') == 'h264' for s in streams) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in streams):
                     raise ValueError('Encoded file has unexpected codecs')
                 if abs(expected_duration - float(output['format']['duration'])) > 2:
                     raise ValueError('Encoded duration differs from source')
+                if method == 'soft':
+                    subtitles = [s for s in streams if s.get('codec_type') == 'subtitle']
+                    if len(subtitles) != 1 or subtitles[0].get('codec_name') != 'mov_text' or subtitles[0].get('tags', {}).get('language') != 'sin':
+                        raise ValueError('Output must contain only one Sinhala subtitle track')
+                    preview = original / 'preview'
+                    preview.mkdir(exist_ok=True)
+                    shutil.copyfile('sinhala.srt', preview / 'sinhala.srt')
+                    print('Sinhala-only MP4 track verified. Separate SRT is available in run artifacts for players that do not import embedded tracks.')
                 if sample_only:
                     stage = 'sample export'
                     preview = original / 'preview'
