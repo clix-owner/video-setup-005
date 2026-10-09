@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
@@ -198,6 +199,22 @@ def upload(path, login, key):
     return file_id
 
 
+def verify_filename(file_id, output_name, login, key, attempts=6, pause=time.sleep):
+    # Read-only polling tolerates delayed metadata; never retry upload or rename.
+    for attempt in range(attempts):
+        try:
+            result = api('file/info', {'login': login, 'key': key, 'file': file_id})
+            info = result.get(file_id, {}) if isinstance(result, dict) else {}
+            if isinstance(info, dict) and info.get('status') == 200 and info.get('name') == output_name:
+                return True
+        except Exception:
+            pass  # Response/error text may contain credentials. Never log it.
+        if attempt + 1 < attempts:
+            print('Waiting for Streamtape filename metadata to update', flush=True)
+            pause(3)
+    return False
+
+
 def main():
     stage = 'preflight'
     try:
@@ -327,9 +344,7 @@ def main():
                               'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
                 if renamed is not True:
                     raise ValueError('Streamtape filename update failed')
-                verified = api('file/info', {'login': values['STREAMTAPE_LOGIN'],
-                               'key': values['STREAMTAPE_KEY'], 'file': file_id}).get(file_id, {})
-                if verified.get('status') != 200 or verified.get('name') != output_name:
+                if not verify_filename(file_id, output_name, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY']):
                     print('::error::Upload exists but final filename could not be verified. Check Streamtape before rerunning.')
                     raise ValueError('Final filename verification failed')
                 # Do not construct, print, summarize or export a Streamtape video URL/ID.
