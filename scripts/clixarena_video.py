@@ -31,9 +31,9 @@ def validate_url(url):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
         raise ValueError('Use a direct HTTPS URL without embedded credentials or fragments')
-    if parsed.port not in (None, 443):
-        raise ValueError('Only HTTPS port 443 is allowed')
-    addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+    if parsed.port not in (None, 443, 8443):
+        raise ValueError('Only HTTPS ports 443 and 8443 are allowed')
+    addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
     if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
         raise ValueError('URL must resolve to a public Internet host')
     return url
