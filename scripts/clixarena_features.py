@@ -34,6 +34,11 @@ def settings():
     if quality not in choices:
         raise ValueError('Unsupported quality choice')
     height, crf = choices[quality]
+    selected_crf = os.getenv('CRF', 'auto') or 'auto'
+    if selected_crf != 'auto':
+        if not re.fullmatch(r'0|[1-9]\d?', selected_crf) or int(selected_crf) > 51:
+            raise ValueError('CRF must be auto or an integer from 0 to 51')
+        crf = int(selected_crf)
     start = timestamp(os.getenv('OVERLAY_START', '5'))
     duration = number(os.getenv('OVERLAY_DURATION', '8'), 4, 60, 'overlay duration')
     active = os.getenv('TITLE_ANIMATION', str(bool(os.getenv('TMDB_URL')))).lower() == 'true'
@@ -45,7 +50,15 @@ def settings():
         parts[key] = active and value == 'true'
     if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
         raise ValueError('TMDB URL required for enabled logo')
-    return {'parts': parts, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
+    layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    positions = {}
+    for key, y in [('logo', 410/1080*100), ('name', 510/1080*100), ('message', 600/1080*100)]:
+        pos = layout.get('positions', {}).get(key, {'x': 50, 'y': y})
+        positions[key] = {axis: number(pos[axis], 5, 95, 'overlay position') for axis in ('x', 'y')}
+    message = layout.get('message', 'සිංහල උපසිරැසි සමග චිත්‍රපට/රූපවාහිනී කතාමාලා\nonline නැරඹීමට පිවිසෙන්න')
+    if not isinstance(message, str) or len(message.encode('utf-8')) > 1500 or re.search(r'[\x00-\x09\x0b-\x1f\x7f]', message) or parts['message'] and not message.strip():
+        raise ValueError('Invalid overlay message')
+    return {'layout': {'positions': positions, 'message': message}, 'parts': parts, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
             'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
@@ -129,8 +142,11 @@ def ass_text(text):
     return re.sub(r' +', r'\\h\\h', text)
 
 
-def write_intro(name, start, duration, parts=None):
+def write_intro(name, start, duration, parts=None, layout=None):
     parts = parts or {'name': True, 'message': True}
+    positions = (layout or {}).get('positions', {})
+    nx, ny = [positions.get('name', {'x':50, 'y':510/1080*100})[axis] * scale for axis, scale in [('x',19.2), ('y',10.8)]]
+    mx, my = [positions.get('message', {'x':50, 'y':600/1080*100})[axis] * scale for axis, scale in [('x',19.2), ('y',10.8)]]
     styles = '''[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
@@ -149,12 +165,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     available_width = 1740
     # Conservative fit for long names, including Algerian capitals.
     size = min(54, max(8, available_width / max(len(name) * 0.8, 1)))
-    events = f'Dialogue: 0,{ass_time(start + delay)},{ass_time(start + duration)},Name,,0,0,0,,{{\\move(960,540,960,510,0,900)\\fad(900,1000)\\fs{size:.1f}}}{ass_text(name)}\n'
+    events = f'Dialogue: 0,{ass_time(start + delay)},{ass_time(start + duration)},Name,,0,0,0,,{{\\move({nx:.2f},{min(1050,ny+30):.2f},{nx:.2f},{ny:.2f},0,900)\\fad(900,1000)\\fs{size:.1f}}}{ass_text(name)}\n'
     if not parts['name']:
         events = ''
-    message = ass_text('සිංහල උපසිරැසි සමග චිත්‍රපට/රූපවාහිනී කතාමාලා') + r'\N' + ass_text('online නැරඹීමට පිවිසෙන්න')
+    message = r'\N'.join(ass_text(line) for line in (layout or {}).get('message', 'සිංහල උපසිරැසි සමග චිත්‍රපට/රූපවාහිනී කතාමාලා\nonline නැරඹීමට පිවිසෙන්න').split('\n'))
     if parts['message']:
-        events += f'Dialogue: 0,{ass_time(start + message_delay)},{ass_time(start + duration)},Message,,0,0,0,,{{\\pos(960,600)\\fad(1000,1000)}}{message}\n'
+        events += f'Dialogue: 0,{ass_time(start + message_delay)},{ass_time(start + duration)},Message,,0,0,0,,{{\\pos({mx:.2f},{my:.2f})\\fad(1000,1000)}}{message}\n'
     Path('intro.ass').write_text(styles + events, encoding='utf-8')
 
 
@@ -172,23 +188,27 @@ def video_dimensions(stream, height):
     return max(2, int(width * factor) // 2 * 2), max(2, int(source_height * factor) // 2 * 2)
 
 
+def logo_dimensions(width, height, logo_size):
+    lw, lh = logo_size
+    # Resize once from original pixels using the same final display bounds.
+    ratio = min(1, width * 920 / 1920 / lw, height * 180 / 1080 / lh)
+    return max(1, round(lw * ratio)), max(1, round(lh * ratio))
+
+
 def filter_graph(width, height, options, logo_size=None):
     base = f'[0:v:0]scale={width}:{height}:flags=lanczos,setsar=1,ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
     base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'
     text = any(options.get('parts', {'name': bool(logo_size), 'message': bool(logo_size)})[key] for key in ('name', 'message'))
     if not logo_size:
         return base + (',ass=intro.ass:fontsdir=fonts:shaping=complex' if text else '') + '[video]'
-    lw, lh = logo_size
-    # Never enlarge artwork beyond native pixels. Fit within preview's logo area.
-    ratio = min(1, width * 920 / 1920 / lw, height * 180 / 1080 / lh)
-    logo_width, logo_height = max(1, round(lw * ratio)), max(1, round(lh * ratio))
     start, duration = options['start'], options['duration']
     fade_in = min(1, duration / 4)
     fade_out = start + duration - 1
+    lp = options.get('layout', {}).get('positions', {}).get('logo', {'x':50,'y':410/1080*100})
     graph = base + '[base];'
-    graph += (f'[1:v]scale={logo_width}:{logo_height}:flags=lanczos,format=rgba,'
+    graph += ('[1:v]format=rgba,'
               f'fade=t=in:st={start}:d={fade_in}:alpha=1,fade=t=out:st={fade_out}:d=1:alpha=1[logo];'
-              f"[base][logo]overlay=x=(W-w)/2:y=H*410/1080-h/2:enable='between(t,{start},{start+duration})':eof_action=pass[art];"
+              f"[base][logo]overlay=x=W*{lp['x']/100}-w/2:y=H*{lp['y']/100}-h/2:enable='between(t,{start},{start+duration})':eof_action=pass:repeatlast=0[art];"
               + ('[art]ass=intro.ass:fontsdir=fonts:shaping=complex[video]' if text else '[art]null[video]'))
     return graph
 

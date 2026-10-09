@@ -14,7 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
-                                write_intro, video_dimensions, filter_graph, encode_progress)
+                                write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
 
 
 def mask(value):
@@ -290,7 +290,7 @@ def main():
                         raise ValueError('Nontransparent artwork')
                     logo_size = (int(logo_info['width']), int(logo_info['height']))
                 if options['parts']['name'] or options['parts']['message']:
-                    write_intro(overlay_name, options['start'], options['duration'], options['parts'])
+                    write_intro(overlay_name, options['start'], options['duration'], options['parts'], options['layout'])
                 stage = 'video download and validation'
                 print('Downloading video', flush=True)
                 download(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3)
@@ -308,12 +308,26 @@ def main():
                 print(f'Output {width} x {height}, H.264 CRF {options["crf"]}', flush=True)
                 if any(options['parts'].values()) and options['start'] >= expected_duration:
                     print('::warning::Title timestamp is outside this encode. It will not appear; choose a timestamp within the sample/full video duration.')
+                logo_input_duration = 0
+                if logo_size and options['start'] < expected_duration:
+                    stage = 'logo display preparation'
+                    display_width, display_height = logo_dimensions(width, height, logo_size)
+                    command(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+                             '-i', 'title-logo.png', '-vf',
+                             f'scale={display_width}:{display_height}:flags=lanczos,format=rgba',
+                             '-frames:v', '1', 'title-logo-display.png'], timeout=120)
+                    logo_size = (display_width, display_height)
+                    logo_input_duration = min(options['duration'], expected_duration - options['start'])
+                    print(f'Logo prepared once at {display_width} x {display_height}; animation input ends after its display window', flush=True)
+                else:
+                    logo_size = None
                 stage = 'encoding'
                 print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)
                 filters = filter_graph(width, height, options, logo_size)
                 inputs = ['-i', 'source.video']
                 if logo_size:
-                    inputs += ['-loop', '1', '-framerate', '30', '-i', 'title-logo.png']
+                    inputs += ['-itsoffset', str(options['start']), '-loop', '1', '-framerate', '30',
+                               '-t', str(logo_input_duration), '-i', 'title-logo-display.png']
                 encode_progress(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y'] + inputs +
                          ['-map', '[video]', '-map', audio_map, '-filter_complex', filters,
                          '-c:v', 'libx264', '-preset', 'fast', '-crf', str(options['crf']),

@@ -12,6 +12,10 @@ on:
         required: true
         default: CLIXARENA.mp4
         type: string
+      overlay_layout:
+        description: Preview layout JSON (set by portal; blank uses defaults)
+        type: string
+        required: false
       overlay_name:
         description: Separate title shown in video (blank uses filename)
         type: string
@@ -43,6 +47,11 @@ on:
           - Original - Balanced
           - 1080p - Balanced
           - 720p - Balanced
+      crf:
+        description: CRF 0-51 (lower = higher quality/larger file); auto uses High 18 or Balanced 23
+        required: true
+        default: '18'
+        type: string
       audio_track:
         description: auto, zero-based track number (0, 1...), or language code (eng, hin...)
         required: true
@@ -110,11 +119,13 @@ jobs:
         id: video
         env:
           VIDEO_URL: ${{ inputs.video_url }}
+          OVERLAY_LAYOUT: ${{ inputs.overlay_layout }}
           OVERLAY_NAME: ${{ inputs.overlay_name }}
           OUTPUT_NAME: ${{ inputs.output_name }}
           SAMPLE_ONLY: ${{ inputs.sample_only }}
           SUBTITLE_PATH: ${{ inputs.subtitle_path }}
           FONT_PATH: ${{ inputs.font_path }}
+          CRF: ${{ inputs.crf }}
           QUALITY: ${{ inputs.quality }}
           AUDIO_TRACK: ${{ inputs.audio_track }}
           TMDB_URL: ${{ inputs.tmdb_url }}

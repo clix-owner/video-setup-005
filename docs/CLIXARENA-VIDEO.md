@@ -61,3 +61,9 @@ Validation includes local FFmpeg rendering/encoding and mocked API, selection an
 The title logo, output name and Sinhala message have independent switches, all enabled by default. The main switch disables all three. Only the logo needs TMDB; only the name needs Algerian. Update both workflow and Vercel files.
 
 File name and Title shown in video are separate editable fields, both filled from TMDB. TV titles support season and episode selection (including specials). Names use Series - Episode title, falling back to Series - Season-1 Episode-1 when the episode title is missing or generic. The workflow overlay_name input controls only the title on video; output_name controls the MP4 and Streamtape filename.
+
+Preview layout editor: click title/message to edit, drag title/message/logo to reposition, or use percent coordinates. Select an item then click empty preview space to place it. Reset positions restores the original arrangement. Title changes do not change the MP4 filename. Custom text/positions pass through validated overlay_layout JSON and are burned into the final video. The browser preview is approximate; repository fonts are used for encoding.
+
+Logo performance: the original English PNG is resized once with Lanczos to its final display size, preserving alpha without upscaling. The small PNG input starts at the configured timestamp and ends at the end of the animation; EOF passes through the full video. Original resolution, CRF, text positions and subtitles remain unchanged. Jobs already running require no modification; updated scripts affect subsequent runs only.
+
+CRF selector defaults to 18 and supports integers 0-51. It overrides High/Balanced compression while keeping the selected resolution. Auto restores High=18/Balanced=23. CRF controls quality and size, not an encoding-speed guarantee.
