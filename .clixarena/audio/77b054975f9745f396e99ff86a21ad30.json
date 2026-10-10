@@ -1,1 +1,1 @@
-{"job":"77b054975f9745f396e99ff86a21ad30","run_id":"38020107165","status":"selected","tracks":[{"index":0,"language":"mal","channels":6,"codec":"eac3"},{"index":1,"language":"mal","channels":2,"codec":"aac"}],"selected":1}
+{"job": "77b054975f9745f396e99ff86a21ad30", "run_id": "38020107165", "status": "encoding", "tracks": [{"index": 0, "language": "mal", "channels": 6, "codec": "eac3"}, {"index": 1, "language": "mal", "channels": 2, "codec": "aac"}], "selected": 1}
