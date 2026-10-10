@@ -67,6 +67,7 @@ def download(url, target, limit):
             if 'text/html' in content_type or 'application/json' in content_type:
                 raise DownloadError('The server returned a webpage or API response instead of video. Obtain a fresh direct download link.')
             total = 0
+            declared_size = response.headers.get('Content-Length', '')
             while block := response.read(1024 * 1024):
                 if total == 0 and block.lstrip()[:32].lower().startswith((b'<!doctype html', b'<html')):
                     raise DownloadError('The server returned an HTML page instead of video. Obtain a fresh direct download link.')
@@ -76,9 +77,11 @@ def download(url, target, limit):
                 if shutil.disk_usage(target.parent).free < 2 * 1024**3:
                     raise DownloadError('Runner disk space is below the 2 GB reserve.')
                 output.write(block)
+            if declared_size.isdigit() and total != int(declared_size):
+                raise DownloadError('Download is incomplete: received size differs from the server Content-Length. Obtain a fresh link and try fewer simultaneous downloads.')
         if not target.stat().st_size:
             raise DownloadError('The server returned an empty file.')
-        print('Download complete; validating video', flush=True)
+        print('Download complete; validating downloaded file', flush=True)
     except urllib.error.HTTPError as error:
         hints = {401: 'Link requires authentication.', 403: 'Link expired, needs cookies, or the host blocked this runner.',
                  404: 'File was not found or the link expired.', 429: 'Host rate limit reached.'}
@@ -105,7 +108,16 @@ def command(args, timeout=60):
 
 
 def probe(path):
-    return json.loads(command(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(path)]))
+    try:
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(path)], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise DownloadError('Media validation timed out. The downloaded file may be damaged or unusually difficult to probe.') from None
+    if result.returncode:
+        raise DownloadError('Media validation failed: the downloaded file is incomplete, damaged, or not a supported media file. No raw tool output logged.')
+    try:
+        return json.loads(result.stdout)
+    except (ValueError, TypeError):
+        raise DownloadError('Media validation returned invalid metadata.') from None
 
 
 def repository_file(root, value, suffix, limit):
@@ -566,10 +578,15 @@ def main():
                 download(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3)
                 source = probe('source.video')
                 if not any(s['codec_type'] == 'video' for s in source['streams']):
-                    raise ValueError('Source has no video stream')
+                    raise DownloadError('Downloaded file contains no video stream.')
                 if shutil.disk_usage('.').free < Path('source.video').stat().st_size * 2 + 2 * 1024**3:
-                    raise ValueError('Insufficient disk space for encoding')
-                source_duration = float(source['format']['duration'])
+                    raise DownloadError('Insufficient runner disk space for encoding: twice the source size plus a 2 GB reserve is required.')
+                try:
+                    source_duration = float(source['format']['duration'])
+                    if not 0 < source_duration < float('inf'):
+                        raise ValueError()
+                except (KeyError, TypeError, ValueError):
+                    raise DownloadError('Downloaded video has no valid duration metadata; encoding cannot safely start.') from None
                 expected_duration = min(180, source_duration) if sample_only else source_duration
                 stage = 'audio and quality selection'
                 audio_map = portal_audio_selection(source['streams'], options['audio'])
