@@ -567,7 +567,7 @@ def main():
                 logo_input_duration = 0
                 if logo_size and options['start'] < expected_duration:
                     stage = 'logo display preparation'
-                    display_width, display_height = logo_dimensions(width, height, logo_size)
+                    display_width, display_height = logo_dimensions(width, height, logo_size, options['layout']['logoScale'])
                     command(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
                              '-i', 'title-logo.png', '-vf',
                              f'scale={display_width}:{display_height}:flags=lanczos,format=rgba',

@@ -51,6 +51,7 @@ def settings():
     if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
         raise ValueError('TMDB URL required for enabled logo')
     layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    logo_scale = number(layout.get('logoScale', 100), 25, 200, 'logo size')
     preset = layout.get('preset', 'veryfast')
     if preset not in ('fast', 'veryfast', 'superfast', 'ultrafast'):
         raise ValueError('Invalid encoder preset')
@@ -68,7 +69,7 @@ def settings():
         if not isinstance(color, str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}', color):
             raise ValueError('Invalid overlay text color')
         styles[key] = {'size': number(style.get('size', default), 8, 160, 'overlay font size'), 'color': color.upper()}
-    return {'layout': {'positions': positions, 'message': message, 'styles': styles}, 'parts': parts, 'preset': preset, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
+    return {'layout': {'positions': positions, 'message': message, 'styles': styles, 'logoScale': logo_scale}, 'parts': parts, 'preset': preset, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
             'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
@@ -210,10 +211,11 @@ def video_dimensions(stream, height):
     return max(2, int(width * factor) // 2 * 2), max(2, int(source_height * factor) // 2 * 2)
 
 
-def logo_dimensions(width, height, logo_size):
+def logo_dimensions(width, height, logo_size, scale=100):
     lw, lh = logo_size
     # Resize once from original pixels using the same final display bounds.
-    ratio = min(1, width * 920 / 1920 / lw, height * 180 / 1080 / lh)
+    factor = number(scale, 25, 200, "logo size") / 100
+    ratio = min(1, width * 920 / 1920 * factor / lw, height * 180 / 1080 * factor / lh, width * 0.95 / lw, height * 0.95 / lh)
     return max(1, round(lw * ratio)), max(1, round(lh * ratio))
 
 
