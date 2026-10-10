@@ -1,1 +1,1 @@
-{"job": "e8e52077650b4965af1d17e5185a3706", "run_id": "38028008911", "status": "waiting_audio", "tracks": [{"index": 0, "language": "hin", "channels": 6, "codec": "aac"}, {"index": 1, "language": "tam", "channels": 6, "codec": "aac"}]}
+{"job":"e8e52077650b4965af1d17e5185a3706","run_id":"38028008911","status":"selected","tracks":[{"index":0,"language":"hin","channels":6,"codec":"aac"},{"index":1,"language":"tam","channels":6,"codec":"aac"}],"selected":1}
