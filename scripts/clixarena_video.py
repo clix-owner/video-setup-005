@@ -283,6 +283,70 @@ def soft_mp4_args(streams, audio_map, duration, crf):
     return args
 
 
+def audio_job_request(job_id, payload=None, sha=None):
+    repo = os.getenv('GITHUB_REPOSITORY', '')
+    token = os.getenv('MAPPING_GITHUB_TOKEN', '')
+    ref = os.getenv('GITHUB_REF_NAME', '')
+    if not re.fullmatch(r'[a-f0-9]{32}', job_id) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not token or not ref:
+        raise ValueError('Audio selection portal configuration missing')
+    endpoint = 'https://api.github.com/repos/' + repo + '/contents/.clixarena/audio/' + job_id + '.json'
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
+    if payload is None:
+        request = urllib.request.Request(endpoint + '?ref=' + urllib.parse.quote(ref, safe=''), headers=headers)
+    else:
+        body = {'message': 'Update audio selection state', 'branch': ref, 'content': base64.b64encode(json.dumps(payload).encode()).decode()}
+        if sha:
+            body['sha'] = sha
+        request = urllib.request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method='PUT')
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(request, timeout=30) as response:
+        return json.loads(response.read(1024 * 1024))
+
+
+def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monotonic, wait_seconds=1200):
+    tracks = [s for s in streams if s.get('codec_type') == 'audio']
+    if choice != 'ask' or len(tracks) <= 1:
+        return audio_selection(streams, 'auto' if choice == 'ask' else choice)
+    job_id = os.getenv('PORTAL_JOB_ID', '')
+    state = {'job': job_id, 'run_id': os.getenv('GITHUB_RUN_ID', ''), 'status': 'waiting_audio', 'tracks': []}
+    for index, track in enumerate(tracks):
+        language = track.get('tags', {}).get('language', 'und')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,20}', language):
+            language = 'und'
+        codec = track.get('codec_name', 'unknown')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', codec):
+            codec = 'unknown'
+        state['tracks'].append({'index': index, 'language': language, 'channels': int(track.get('channels', 0)), 'codec': codec})
+    try:
+        current = audio_job_request(job_id)
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+        current = None
+    audio_job_request(job_id, state, current.get('sha') if current else None)
+    print('Multiple audio tracks found. Select audio in the Vercel page; encoding is paused for up to 20 minutes.', flush=True)
+    deadline = clock() + wait_seconds
+    while clock() < deadline:
+        pause(5)
+        current = audio_job_request(job_id)
+        updated = json.loads(base64.b64decode(current['content']).decode())
+        if updated.get('job') != job_id or updated.get('run_id') != state['run_id']:
+            raise ValueError('Audio selection does not match this run')
+        selected = updated.get('selected')
+        if type(selected) is int and 0 <= selected < len(tracks) and updated.get('status') == 'selected':
+            updated['status'] = 'encoding'
+            audio_job_request(job_id, updated, current['sha'])
+            print('Selected audio confirmed; starting encoding', flush=True)
+            return audio_selection(streams, str(selected))
+    state['status'] = 'expired'
+    try:
+        audio_job_request(job_id, state, current['sha'])
+    except Exception:
+        pass
+    print('::error::Audio selection timed out after 20 minutes. No encode or upload was started.')
+    raise ValueError('Audio selection timed out')
+
+
 def merge_mapping(rows, identity, file_id):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError('Invalid mappings file')
@@ -494,7 +558,7 @@ def main():
                 source_duration = float(source['format']['duration'])
                 expected_duration = min(180, source_duration) if sample_only else source_duration
                 stage = 'audio and quality selection'
-                audio_map = audio_selection(source['streams'], options['audio'])
+                audio_map = portal_audio_selection(source['streams'], options['audio'])
                 video_stream = next(s for s in source['streams'] if s['codec_type'] == 'video')
                 width, height = video_dimensions(video_stream, options['height'])
                 print(f'Output {width} x {height}, H.264 CRF {options["crf"]}, preset {options["preset"]}', flush=True)

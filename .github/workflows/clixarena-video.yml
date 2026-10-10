@@ -138,6 +138,7 @@ jobs:
           FONT_PATH: ${{ inputs.font_path }}
           CRF: ${{ inputs.crf }}
           QUALITY: ${{ inputs.quality }}
+          PORTAL_JOB_ID: ${{ inputs.job_id }}
           AUDIO_TRACK: ${{ inputs.audio_track }}
           TMDB_URL: ${{ inputs.tmdb_url }}
           TITLE_ANIMATION: ${{ inputs.title_animation }}
