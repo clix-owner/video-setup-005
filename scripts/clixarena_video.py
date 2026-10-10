@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import random
 import shutil
 import socket
 import ssl
@@ -299,8 +300,17 @@ def audio_job_request(job_id, payload=None, sha=None):
             body['sha'] = sha
         request = urllib.request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method='PUT')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    with opener.open(request, timeout=30) as response:
-        return json.loads(response.read(1024 * 1024))
+    for attempt in range(12):
+        try:
+            with opener.open(request, timeout=30) as response:
+                return json.loads(response.read(1024 * 1024))
+        except urllib.error.HTTPError as error:
+            if payload is None or error.code != 409 or attempt == 11:
+                raise
+            time.sleep(random.uniform(0.15, 1.0) * min(3, 1 + attempt // 4))
+            current = audio_job_request(job_id)
+            body['sha'] = current['sha']
+            request = urllib.request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method='PUT')
 
 
 def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monotonic, wait_seconds=1200):
@@ -326,8 +336,11 @@ def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monoton
     audio_job_request(job_id, state, current.get('sha') if current else None)
     print('Multiple audio tracks found. Select audio in the Vercel page; encoding is paused for up to 20 minutes.', flush=True)
     deadline = clock() + wait_seconds
-    while clock() < deadline:
-        pause(5)
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        pause(min(90, remaining))
         current = audio_job_request(job_id)
         updated = json.loads(base64.b64decode(current['content']).decode())
         if updated.get('job') != job_id or updated.get('run_id') != state['run_id']:
@@ -381,7 +394,7 @@ def save_mapping(file_id):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     endpoint = 'https://api.github.com/repos/' + repo + '/contents/mappings.json'
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}
-    for attempt in range(3):
+    for attempt in range(12):
         try:
             request = urllib.request.Request(endpoint + '?ref=' + urllib.parse.quote(ref, safe=''), headers=headers)
             try:
@@ -406,8 +419,9 @@ def save_mapping(file_id):
             print('Video mapping saved to mappings.json', flush=True)
             return
         except urllib.error.HTTPError as error:
-            if error.code not in (409, 422) or attempt == 2:
+            if error.code not in (409, 422) or attempt == 11:
                 raise
+            time.sleep(random.uniform(0.15, 1.0) * min(3, 1 + attempt // 4))
     raise ValueError('Mapping save could not be confirmed')
 
 

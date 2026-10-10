@@ -111,7 +111,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: clixarena-video
+  group: clixarena-video-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
   encode:
