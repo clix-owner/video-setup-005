@@ -47,7 +47,7 @@ on:
       quality:
         description: Output resolution and quality (never upscales)
         required: true
-        default: Original - High
+        default: 720p - Balanced
         type: choice
         options:
           - Original - High
@@ -59,7 +59,7 @@ on:
       crf:
         description: CRF 0-51 (lower = higher quality/larger file); auto uses High 18 or Balanced 23
         required: true
-        default: '18'
+        default: 'auto'
         type: string
       audio_track:
         description: auto, zero-based track number (0, 1...), or language code (eng, hin...)
@@ -109,7 +109,7 @@ on:
         required: false
         type: string
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: clixarena-video
   cancel-in-progress: false
@@ -127,6 +127,7 @@ jobs:
       - name: Download, validate, encode and upload
         id: video
         env:
+          MAPPING_GITHUB_TOKEN: ${{ github.token }}
           VIDEO_URL: ${{ inputs.video_url }}
           OVERLAY_LAYOUT: ${{ inputs.overlay_layout }}
           OVERLAY_NAME: ${{ inputs.overlay_name }}
@@ -149,6 +150,14 @@ jobs:
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
         run: python3 scripts/clixarena_video.py
+      - name: Saved video mapping
+        if: ${{ always() && !inputs.sample_only }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: CLIXARENA-mapping
+          path: mapping-result.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Downloadable sample
         if: ${{ inputs.sample_only && success() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

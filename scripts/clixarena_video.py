@@ -1,4 +1,5 @@
 """Manual Actions media pipeline. Never print remote responses or credentials."""
+import base64
 import hashlib
 import ipaddress
 import json
@@ -7,6 +8,8 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import ssl
+import urllib.error
 import struct
 import subprocess
 import tempfile
@@ -49,19 +52,48 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect())
 
 
+class DownloadError(Exception):
+    """Only fixed, credential-free messages may be used here."""
+
+
 def download(url, target, limit):
     validate_url(url)
     mask(url)
-    request = urllib.request.Request(url, headers={'User-Agent': 'CLIXARENA/1.0'})
-    with OPENER.open(request, timeout=60) as response, target.open('wb') as output:
-        total = 0
-        while block := response.read(1024 * 1024):
-            total += len(block)
-            if total > limit or shutil.disk_usage(target.parent).free < 2 * 1024**3:
-                raise ValueError('Download exceeds size limit or disk reserve')
-            output.write(block)
-    if not target.stat().st_size:
-        raise ValueError('Downloaded file is empty')
+    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': '*/*'})
+    try:
+        with OPENER.open(request, timeout=60) as response, target.open('wb') as output:
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'text/html' in content_type or 'application/json' in content_type:
+                raise DownloadError('The server returned a webpage or API response instead of video. Obtain a fresh direct download link.')
+            total = 0
+            while block := response.read(1024 * 1024):
+                if total == 0 and block.lstrip()[:32].lower().startswith((b'<!doctype html', b'<html')):
+                    raise DownloadError('The server returned an HTML page instead of video. Obtain a fresh direct download link.')
+                total += len(block)
+                if total > limit:
+                    raise DownloadError('Video exceeds the 12 GB download limit.')
+                if shutil.disk_usage(target.parent).free < 2 * 1024**3:
+                    raise DownloadError('Runner disk space is below the 2 GB reserve.')
+                output.write(block)
+        if not target.stat().st_size:
+            raise DownloadError('The server returned an empty file.')
+        print('Download complete; validating video', flush=True)
+    except urllib.error.HTTPError as error:
+        hints = {401: 'Link requires authentication.', 403: 'Link expired, needs cookies, or the host blocked this runner.',
+                 404: 'File was not found or the link expired.', 429: 'Host rate limit reached.'}
+        raise DownloadError('Download HTTP ' + str(int(error.code)) + '. ' + hints.get(error.code, 'Video host rejected the download request.')) from None
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, ssl.SSLError):
+            message = 'Download TLS certificate validation failed.'
+        elif isinstance(error.reason, socket.gaierror):
+            message = 'Download hostname could not be resolved.'
+        elif isinstance(error.reason, (TimeoutError, socket.timeout)):
+            message = 'Download connection timed out; the host or port may be unreachable from GitHub.'
+        else:
+            message = 'Download connection failed; the host or port may be unavailable or blocked from GitHub.'
+        raise DownloadError(message) from None
+    except (TimeoutError, socket.timeout):
+        raise DownloadError('Download timed out while receiving video data.') from None
 
 
 def command(args, timeout=60):
@@ -215,6 +247,17 @@ def verify_filename(file_id, output_name, login, key, attempts=6, pause=time.sle
     return False
 
 
+def audio_encoding_args(streams, audio_map):
+    audio = [s for s in streams if s.get('codec_type') == 'audio']
+    if not audio:
+        return []
+    selected = audio[int(audio_map.split(':')[-1].rstrip('?'))]
+    if selected.get('codec_name') == 'aac':
+        print('AAC audio: copying without re-encoding', flush=True)
+        return ['-c:a', 'copy']
+    return ['-c:a', 'aac', '-b:a', '192k']
+
+
 def soft_mp4_args(streams, audio_map, duration, crf):
     video = next(s for s in streams if s.get('codec_type') == 'video')
     args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
@@ -240,6 +283,70 @@ def soft_mp4_args(streams, audio_map, duration, crf):
     return args
 
 
+def merge_mapping(rows, identity, file_id):
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError('Invalid mappings file')
+    key = 'anilist_id' if identity['type'] == 'anime' else 'tmdb_id'
+    item = dict(identity, file_id=file_id)
+    match = lambda row: all(row.get(k) == item[k] for k in ('type', key, 'season', 'episode'))
+    return [row for row in rows if not match(row)] + [item]
+
+
+def save_mapping(file_id):
+    identity = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}').get('mapping')
+    if identity is None:
+        return
+    kind = identity.get('type')
+    key = 'anilist_id' if kind == 'anime' else 'tmdb_id'
+    if kind not in ('movie', 'tv', 'anime') or set(identity) not in ({'type', key, 'season', 'episode'}, {'type', key, 'season', 'episode', 'name'}):
+        raise ValueError('Invalid mapping identity')
+    if 'name' in identity and (not isinstance(identity['name'], str) or not identity['name'].strip() or len(identity['name'].encode('utf-8')) > 1500 or re.search(r'[\x00-\x1f\x7f]', identity['name'])):
+        raise ValueError('Invalid mapping name')
+    if any(type(identity[k]) is not int or not 0 <= identity[k] <= 2147483647 for k in (key, 'season', 'episode')) or identity[key] < 1:
+        raise ValueError('Invalid mapping numbers')
+    if kind == 'movie' and (identity['season'] or identity['episode']) or kind != 'movie' and identity['episode'] < 1:
+        raise ValueError('Invalid mapping episode')
+    backup = Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'mapping-result.json'
+    backup.write_text(json.dumps([dict(identity, file_id=file_id)], indent=2) + '\n', encoding='utf-8')
+    repo = os.getenv('GITHUB_REPOSITORY', '')
+    token = os.getenv('MAPPING_GITHUB_TOKEN', '')
+    ref = os.getenv('GITHUB_REF_NAME', '')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not token or not ref:
+        raise ValueError('Mapping repository configuration missing')
+    mask(token)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    endpoint = 'https://api.github.com/repos/' + repo + '/contents/mappings.json'
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}
+    for attempt in range(3):
+        try:
+            request = urllib.request.Request(endpoint + '?ref=' + urllib.parse.quote(ref, safe=''), headers=headers)
+            try:
+                with opener.open(request, timeout=60) as response:
+                    current = json.loads(response.read(8 * 1024**2))
+                rows = json.loads(base64.b64decode(current['content']).decode('utf-8-sig'))
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise
+                current, rows = None, []
+            merged = merge_mapping(rows, identity, file_id)
+            content = json.dumps(merged, indent=2) + '\n'
+            backup.write_text(content, encoding='utf-8')
+            if rows == merged:
+                return
+            payload = {'message': 'Update CLIXARENA video mapping', 'branch': ref, 'content': base64.b64encode(content.encode()).decode()}
+            if current:
+                payload['sha'] = current['sha']
+            request = urllib.request.Request(endpoint, data=json.dumps(payload).encode(), headers=headers, method='PUT')
+            with opener.open(request, timeout=60) as response:
+                response.read(1024 * 1024)
+            print('Video mapping saved to mappings.json', flush=True)
+            return
+        except urllib.error.HTTPError as error:
+            if error.code not in (409, 422) or attempt == 2:
+                raise
+    raise ValueError('Mapping save could not be confirmed')
+
+
 def complete_upload(path, output_name, values):
     print('Uploading video to Streamtape', flush=True)
     file_id = upload(path, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
@@ -251,6 +358,10 @@ def complete_upload(path, output_name, values):
     filename_verified = verify_filename(file_id, output_name, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
     if not filename_verified:
         print('::warning::Upload verified and rename accepted, but the final filename could not be confirmed. Check the filename in Streamtape file manager; do not rerun just for this warning.')
+    try:
+        save_mapping(file_id)
+    except Exception:
+        print('::warning::Video uploaded, but mappings.json could not be saved. Download the CLIXARENA-mapping artifact and merge it into mappings.json; do not upload the video again.')
     # Do not construct, print, summarize or export a Streamtape video URL/ID.
     print('Upload verified. Find the video in your Streamtape file manager.', flush=True)
     if os.getenv('GITHUB_OUTPUT'):
@@ -295,7 +406,7 @@ def main():
         if len(overlay_name.encode('utf-8')) > 500 or re.search(r'[\x00-\x1f\x7f]', overlay_name):
             raise ValueError('Invalid display title')
         if method == 'transfer':
-            stage = 'original video download and upload'
+            stage = 'original video download'
             with tempfile.TemporaryDirectory(prefix='clixarena-transfer-') as directory:
                 original = Path.cwd()
                 os.chdir(directory)
@@ -303,6 +414,7 @@ def main():
                     print('Downloading original video; no subtitle or encoding step', flush=True)
                     path = Path('transfer.video')
                     download(values['VIDEO_URL'], path, 12 * 1024**3)
+                    stage = 'original video validation'
                     info = probe(str(path))
                     if not any(s.get('codec_type') == 'video' for s in info.get('streams', [])):
                         raise ValueError('Source is not a video')
@@ -314,6 +426,7 @@ def main():
                     else:
                         raise ValueError('Download-only method supports original MP4/MKV containers')
                     stem = re.sub(r'\.(mp4|mkv)$', '', output_name, flags=re.I)
+                    stage = 'Streamtape original video upload and filename update'
                     complete_upload(path, stem + extension, values)
                 finally:
                     os.chdir(original)
@@ -384,7 +497,7 @@ def main():
                 audio_map = audio_selection(source['streams'], options['audio'])
                 video_stream = next(s for s in source['streams'] if s['codec_type'] == 'video')
                 width, height = video_dimensions(video_stream, options['height'])
-                print(f'Output {width} x {height}, H.264 CRF {options["crf"]}', flush=True)
+                print(f'Output {width} x {height}, H.264 CRF {options["crf"]}, preset {options["preset"]}', flush=True)
                 if any(options['parts'].values()) and options['start'] >= expected_duration:
                     print('::warning::Title timestamp is outside this encode. It will not appear; choose a timestamp within the sample/full video duration.')
                 logo_input_duration = 0
@@ -415,8 +528,8 @@ def main():
                                    '-t', str(logo_input_duration), '-i', 'title-logo-display.png']
                     encode_progress(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y'] + inputs +
                              ['-map', '[video]', '-map', audio_map, '-filter_complex', filters,
-                             '-c:v', 'libx264', '-preset', 'fast', '-crf', str(options['crf']),
-                             '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+                             '-c:v', 'libx264', '-preset', options['preset'], '-crf', str(options['crf']),
+                             '-pix_fmt', 'yuv420p'] + audio_encoding_args(source['streams'], audio_map) + [
                              '-t', str(expected_duration), '-movflags', '+faststart'], expected_duration)
                 output = probe('clixarena.mp4')
                 streams = output['streams']
@@ -445,6 +558,9 @@ def main():
                 complete_upload(Path('clixarena.mp4'), output_name, values)
             finally:
                 os.chdir(original)
+    except DownloadError as error:
+        print('::error::' + str(error))
+        return 1
     except Exception:
         # Exception strings can contain signed URLs, credentials and response bodies.
         print('::error::Failed during ' + stage + '. Check inputs, secrets, formats, service availability and disk space. Raw errors suppressed to protect credentials.')

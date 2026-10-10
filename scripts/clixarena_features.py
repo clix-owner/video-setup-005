@@ -27,7 +27,7 @@ def timestamp(value):
 
 
 def settings():
-    quality = os.getenv('QUALITY', 'Original - High')
+    quality = os.getenv('QUALITY', '720p - Balanced')
     choices = {'Original - High': (None, 18), '1080p - High': (1080, 18),
                '720p - High': (720, 18), 'Original - Balanced': (None, 23),
                '1080p - Balanced': (1080, 23), '720p - Balanced': (720, 23)}
@@ -51,6 +51,9 @@ def settings():
     if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
         raise ValueError('TMDB URL required for enabled logo')
     layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    preset = layout.get('preset', 'veryfast')
+    if preset not in ('fast', 'veryfast', 'superfast', 'ultrafast'):
+        raise ValueError('Invalid encoder preset')
     positions = {}
     for key, y in [('logo', 410/1080*100), ('name', 510/1080*100), ('message', 600/1080*100)]:
         pos = layout.get('positions', {}).get(key, {'x': 50, 'y': y})
@@ -65,7 +68,7 @@ def settings():
         if not isinstance(color, str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}', color):
             raise ValueError('Invalid overlay text color')
         styles[key] = {'size': number(style.get('size', default), 8, 160, 'overlay font size'), 'color': color.upper()}
-    return {'layout': {'positions': positions, 'message': message, 'styles': styles}, 'parts': parts, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
+    return {'layout': {'positions': positions, 'message': message, 'styles': styles}, 'parts': parts, 'preset': preset, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
             'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
@@ -108,14 +111,13 @@ def audio_selection(streams, choice):
 
 
 def select_logo(logos):
-    candidates = [item for item in logos if item.get('iso_639_1') == 'en'
-                  and re.fullmatch(r'/[A-Za-z0-9]+\.png', item.get('file_path', ''))
+    candidates = [item for item in logos if re.fullmatch(r'/[A-Za-z0-9]+\.png', item.get('file_path', ''))
                   and isinstance(item.get('width'), int) and isinstance(item.get('height'), int)
                   and item['width'] > 0 and item['height'] > 0]
     if not candidates:
-        print('::error::TMDB has no English PNG title logo for this title. No other-language artwork is substituted.')
+        print('::error::TMDB has no usable PNG title logo for this title.')
         raise ValueError('English logo unavailable')
-    return max(candidates, key=lambda i: (i['width'] * i['height'], i.get('vote_average', 0)))
+    return max(candidates, key=lambda i: (2 if i.get('iso_639_1') == 'en' else 1 if i.get('iso_639_1') is None else 0, i['width'] * i['height'], i.get('vote_average', 0)))
 
 
 def fetch_logo(url, token, download):
@@ -128,14 +130,14 @@ def fetch_logo(url, token, download):
         raise ValueError('TMDB token missing')
     from clixarena_video import NoRedirect
     kind, identifier = match.groups()
-    endpoint = f'https://api.themoviedb.org/3/{kind}/{identifier}/images?include_image_language=en'
+    endpoint = f'https://api.themoviedb.org/3/{kind}/{identifier}/images'
     req = urllib.request.Request(endpoint, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/json'})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(req, timeout=60) as response:
         body = json.loads(response.read(4 * 1024**2))
     chosen = select_logo(body.get('logos', []))
     download('https://image.tmdb.org/t/p/original' + chosen['file_path'], Path('title-logo.png'), 40 * 1024**2)
-    print(f'English title logo: original PNG, {chosen["width"]} x {chosen["height"]} (highest pixel count available)')
+    print(f'Title logo ({chosen.get("iso_639_1") or "unlabelled"}): original PNG, {chosen["width"]} x {chosen["height"]} (highest pixel count available)')
 
 
 def ass_time(seconds):
