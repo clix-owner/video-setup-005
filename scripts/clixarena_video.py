@@ -1,6 +1,9 @@
 """Manual Actions media pipeline. Never print remote responses or credentials."""
 import base64
 import hashlib
+import http.cookiejar
+import http.client
+from html.parser import HTMLParser
 import ipaddress
 import json
 import os
@@ -57,17 +60,117 @@ class DownloadError(Exception):
     """Only fixed, credential-free messages may be used here."""
 
 
+
+class RetryableDownloadError(DownloadError):
+    """Retry only downloads, never upload or workflow dispatch."""
+
+
+class DriveConfirmation(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.forms = []; self.current = None
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'form':
+            self.current = {'action': attrs.get('action', ''), 'method': attrs.get('method', 'get').lower(), 'fields': {}}
+        elif tag == 'input' and self.current is not None and attrs.get('name'):
+            self.current['fields'][attrs['name']] = attrs.get('value', '')
+    def handle_endtag(self, tag):
+        if tag == 'form' and self.current is not None:
+            self.forms.append(self.current); self.current = None
+
+
+def resolve_video_source(url):
+    parsed = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    if parsed.hostname in ('drive.google.com', 'www.drive.google.com'):
+        match = re.fullmatch(r'/file/d/([A-Za-z0-9_-]+)(?:/[^/]*)?/?', parsed.path)
+        file_id = match.group(1) if match else query.get('id', [''])[0] if parsed.path in ('/open', '/uc') else ''
+        if not re.fullmatch(r'[A-Za-z0-9_-]{5,200}', file_id):
+            raise DownloadError('Use a Google Drive file share link, not a folder or document link.')
+        params = {'export': 'download', 'id': file_id}
+        resource_key = query.get('resourcekey', [''])[0]
+        if resource_key:
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', resource_key):
+                raise DownloadError('Invalid Google Drive resource key.')
+            params['resourcekey'] = resource_key
+        return 'https://drive.google.com/uc?' + urllib.parse.urlencode(params), file_id
+    if parsed.hostname in ('www.dropbox.com', 'dropbox.com') and parsed.path.startswith(('/s/', '/scl/fi/')):
+        params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        params = [(k, v) for k, v in params if k not in ('dl', 'raw')] + [('dl', '1')]
+        return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(params))), None
+    return url, None
+
+
+def open_video_response(opener, request, drive_id):
+    for step in range(3):
+        response = opener.open(request, timeout=60)
+        if not drive_id or 'text/html' not in response.headers.get('Content-Type', '').lower():
+            return response
+        try:
+            final_url = response.geturl()
+            body = response.read(2 * 1024**2 + 1)
+        finally:
+            response.close()
+        if len(body) > 2 * 1024**2:
+            raise DownloadError('Google Drive returned an unexpectedly large confirmation page.')
+        text = body.decode('utf-8', errors='replace')
+        parser = DriveConfirmation(); parser.feed(text)
+        confirmed = None
+        for form in parser.forms:
+            action = urllib.parse.urljoin(final_url, form['action'])
+            parsed = urllib.parse.urlsplit(action)
+            if (form['method'] == 'get' and parsed.scheme == 'https' and parsed.hostname in ('drive.google.com', 'drive.usercontent.google.com')
+                    and parsed.path in ('/uc', '/download') and parsed.port in (None, 443) and not parsed.username and not parsed.password and not parsed.fragment):
+                params = dict(urllib.parse.parse_qsl(parsed.query)); params.update(form['fields'])
+                if params.get('id') != drive_id or params.get('export', 'download') != 'download' or not params.get('confirm'):
+                    continue
+                confirmed = urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(params)))
+                break
+        if confirmed is None:
+            lower = text.lower()
+            if any(x in lower for x in ('too many users', 'download quota', 'quota exceeded')):
+                raise DownloadError('Google Drive download quota is exceeded. Wait or use another source.')
+            raise DownloadError('Google Drive did not provide a downloadable file. Enable Anyone with the link and allow downloads; login, CAPTCHA and restricted files are unsupported.')
+        validate_url(confirmed); mask(confirmed)
+        request = urllib.request.Request(confirmed, headers={'User-Agent': 'Mozilla/5.0', 'Accept-Encoding': 'identity'})
+    raise DownloadError('Google Drive download confirmation did not complete. Check sharing and download permissions.')
+
+
 def download(url, target, limit):
+    validate_url(url); mask(url)
+    source, drive_id = resolve_video_source(url)
+    if drive_id:
+        print('Google Drive file link detected; resolving download', flush=True)
+    for attempt in range(3):
+        cookies = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect(), urllib.request.HTTPCookieProcessor(cookies)) if drive_id else OPENER
+        try:
+            _download_once(source, target, limit, opener, drive_id)
+            return
+        except RetryableDownloadError:
+            target.unlink(missing_ok=True)
+            if attempt == 2:
+                raise
+            print('Video download interrupted; retrying from the beginning (attempt ' + str(attempt + 2) + '/3)', flush=True)
+            time.sleep(2 * (attempt + 1))
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+
+
+def _download_once(url, target, limit, opener=OPENER, drive_id=None):
     validate_url(url)
     mask(url)
-    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': '*/*'})
+    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Accept-Encoding': 'identity'})
     try:
-        with OPENER.open(request, timeout=60) as response, target.open('wb') as output:
+        with open_video_response(opener, request, drive_id) as response, target.open('wb') as output:
             content_type = response.headers.get('Content-Type', '').lower()
             if 'text/html' in content_type or 'application/json' in content_type:
                 raise DownloadError('The server returned a webpage or API response instead of video. Obtain a fresh direct download link.')
             total = 0
             declared_size = response.headers.get('Content-Length', '')
+            if declared_size.isdigit() and int(declared_size) > limit:
+                raise DownloadError('Video exceeds the 12 GB download limit.')
             while block := response.read(1024 * 1024):
                 if total == 0 and block.lstrip()[:32].lower().startswith((b'<!doctype html', b'<html')):
                     raise DownloadError('The server returned an HTML page instead of video. Obtain a fresh direct download link.')
@@ -78,14 +181,15 @@ def download(url, target, limit):
                     raise DownloadError('Runner disk space is below the 2 GB reserve.')
                 output.write(block)
             if declared_size.isdigit() and total != int(declared_size):
-                raise DownloadError('Download is incomplete: received size differs from the server Content-Length. Obtain a fresh link and try fewer simultaneous downloads.')
+                raise RetryableDownloadError('Download is incomplete after three attempts: received size differs from the server Content-Length. The host may be truncating the file or reporting an incorrect size.')
         if not target.stat().st_size:
             raise DownloadError('The server returned an empty file.')
         print('Download complete; validating downloaded file', flush=True)
     except urllib.error.HTTPError as error:
         hints = {401: 'Link requires authentication.', 403: 'Link expired, needs cookies, or the host blocked this runner.',
                  404: 'File was not found or the link expired.', 429: 'Host rate limit reached.'}
-        raise DownloadError('Download HTTP ' + str(int(error.code)) + '. ' + hints.get(error.code, 'Video host rejected the download request.')) from None
+        kind = RetryableDownloadError if error.code in (408, 429, 500, 502, 503, 504) else DownloadError
+        raise kind('Download HTTP ' + str(int(error.code)) + '. ' + hints.get(error.code, 'Video host rejected the download request.')) from None
     except urllib.error.URLError as error:
         if isinstance(error.reason, ssl.SSLError):
             message = 'Download TLS certificate validation failed.'
@@ -95,9 +199,11 @@ def download(url, target, limit):
             message = 'Download connection timed out; the host or port may be unreachable from GitHub.'
         else:
             message = 'Download connection failed; the host or port may be unavailable or blocked from GitHub.'
-        raise DownloadError(message) from None
+        raise (DownloadError if isinstance(error.reason, (ssl.SSLError, socket.gaierror)) else RetryableDownloadError)(message) from None
     except (TimeoutError, socket.timeout):
-        raise DownloadError('Download timed out while receiving video data.') from None
+        raise RetryableDownloadError('Download timed out while receiving video data.') from None
+    except (http.client.IncompleteRead, ConnectionError):
+        raise RetryableDownloadError('Video connection ended before the download completed.') from None
 
 
 def command(args, timeout=60):
@@ -136,14 +242,14 @@ def output_filename(value):
     name = value.strip()
     if not name or name.startswith('.') or any(c in name for c in '/\\:"<>|?*') or any(ord(c) < 32 or ord(c) == 127 for c in name):
         raise ValueError('Invalid output filename')
-    if name.lower().endswith('.mp4'):
+    if name.lower().endswith(('.mp4', '.mkv')):
         name = name[:-4]
     if not name.strip() or len(name.encode('utf-8')) > 180:
         raise ValueError('Output filename is empty or too long')
     return name + '.mp4'
 
 
-def validate_sinhala_font(path):
+def validate_sinhala_font(path, require_modern_iskoola=True):
     data = Path(path).read_bytes()
     count = struct.unpack_from('>H', data, 4)[0]
     tables = {}
@@ -168,13 +274,80 @@ def validate_sinhala_font(path):
             match = re.search(r'Version\s+(\d+(?:\.\d+)?)', text, re.I)
             if match:
                 versions.append(float(match[1]))
-    if not versions or max(versions) < 6:
+    if require_modern_iskoola and (not versions or max(versions) < 6):
         print('::error::Use a modern Iskoola Pota font (version 6 or later). The supplied Windows font is version 6.96; replace fonts/IskoolaPota.ttf. Older versions are not supported by this pipeline.')
         raise ValueError('Unsupported Iskoola Pota version')
-    print('Iskoola Pota font version: ' + str(max(versions)), flush=True)
+    if require_modern_iskoola:
+        print('Iskoola Pota font version: ' + str(max(versions)), flush=True)
 
 
-def prepare_ass():
+def selected_font_file(root, value):
+    if value.startswith('google:'):
+        family = value[7:]
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 ._-]{0,120}', family):
+            raise DownloadError('Invalid Google font family.')
+        cache = Path(os.getenv('RUNNER_TEMP', tempfile.gettempdir())) / 'clixarena-google-fonts'
+        cache.mkdir(parents=True, exist_ok=True)
+        target = cache / (hashlib.sha256(family.encode()).hexdigest() + '.ttf')
+        if not target.is_file():
+            try:
+                request = urllib.request.Request('https://fonts.googleapis.com/css?family=' + urllib.parse.quote_plus(family), headers={'User-Agent': 'Mozilla/4.0'})
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    css = response.read(1024*1024).decode('utf-8')
+                urls = re.findall(r'url\((https://fonts\.gstatic\.com/[^)\s]+)\)', css)
+                if len(urls) != 1:
+                    raise ValueError('Expected a full font')
+                url = urllib.parse.urlsplit(urls[0])
+                if url.hostname != 'fonts.gstatic.com' or url.port not in (None,443) or url.username or url.fragment:
+                    raise ValueError('Invalid font host')
+                with urllib.request.urlopen(urls[0], timeout=60) as response:
+                    if urllib.parse.urlsplit(response.url).hostname != 'fonts.gstatic.com':
+                        raise ValueError('Invalid font redirect')
+                    data = response.read(30*1024**2+1)
+                if len(data)>30*1024**2 or data[:4] not in (b'\x00\x01\x00\x00',b'OTTO'):
+                    raise ValueError('Expected a TTF/OTF font')
+                target.write_bytes(data)
+            except Exception:
+                raise DownloadError('Google font could not be downloaded as TTF/OTF. Choose another font or upload its TTF/OTF file.') from None
+        return target
+    system_fonts = {'system:noto-sinhala': '/usr/share/fonts/truetype/noto/NotoSansSinhala-Regular.ttf',
+                    'system:dejavu-sans': '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                    'system:dejavu-serif': '/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf'}
+    if value in system_fonts:
+        path = Path(system_fonts[value])
+        if not path.is_file():
+            raise DownloadError('Selected system font is unavailable; update the media-tools workflow step.')
+        return path
+    relative = Path(value)
+    if relative.is_absolute() or '..' in relative.parts or not relative.parts or relative.parts[0] != 'fonts' or relative.suffix.lower() not in ('.ttf', '.otf'):
+        raise DownloadError('Choose a TTF/OTF inside the repository fonts folder, or a listed system font.')
+    return repository_file(root, value, relative.suffix.lower(), 30 * 1024**2)
+
+
+def validate_selected_font(path, subtitle, language):
+    family = command(['fc-scan', '--format', '%{family}', str(path)]).split(',')[0].strip()
+    if not family or re.search(r'[,\\\x00-\x1f\x7f]', family):
+        raise DownloadError('Selected font has an invalid family name.')
+    charset = command(['fc-scan', '--format', '%{charset}', str(path)])
+    ranges = []
+    for item in charset.split():
+        endpoints = item.split('-')
+        if len(endpoints) in (1, 2) and all(re.fullmatch('[0-9a-fA-F]+', v) for v in endpoints):
+            ranges.append((int(endpoints[0], 16), int(endpoints[-1], 16)))
+    plain_text = re.sub(r'<[^>]*>|\{[^}]*\}', '', subtitle)
+    required = {ord(c) for c in plain_text if ('\u0d80' <= c <= '\u0dff') or ('A' <= c <= 'Z') or ('a' <= c <= 'z')}
+    if any(not any(start <= value <= end for start, end in ranges) for value in required):
+        raise DownloadError('Selected font is missing characters used in this subtitle. Choose a font that supports the selected language.')
+    if language == 'sin':
+        try:
+            validate_sinhala_font(path, require_modern_iskoola=family == 'Iskoola Pota')
+        except (ValueError, KeyError, struct.error):
+            raise DownloadError('Selected Sinhala font lacks supported shaping tables or has an unsupported Iskoola Pota version.') from None
+    print('Selected subtitle font verified', flush=True)
+    return family
+
+
+def prepare_ass(family='Iskoola Pota'):
     command(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
              '-sub_charenc', 'UTF-8', '-i', 'subtitles.srt', 'subtitles.ass'])
     path = Path('subtitles.ass')
@@ -188,7 +361,7 @@ def prepare_ass():
             fields = [field.strip() for field in line.split(':', 1)[1].split(',')]
         if styles and fields and line.startswith('Style:'):
             values = line.split(':', 1)[1].strip().split(',')
-            settings = {'Fontname': 'Iskoola Pota', 'Fontsize': '22', 'Outline': '1',
+            settings = {'Fontname': family, 'Fontsize': '22', 'Outline': '1',
                         'Shadow': '0', 'MarginV': '24', 'Spacing': '0', 'Encoding': '1',
                         'PrimaryColour': '&H00FFFFFF', 'SecondaryColour': '&H00FFFFFF',
                         'OutlineColour': '&H00000000', 'BackColour': '&H00000000'}
@@ -271,7 +444,7 @@ def audio_encoding_args(streams, audio_map):
     return ['-c:a', 'aac', '-b:a', '192k']
 
 
-def soft_mp4_args(streams, audio_map, duration, crf):
+def soft_mp4_args(streams, audio_map, duration, crf, language='sin'):
     video = next(s for s in streams if s.get('codec_type') == 'video')
     args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
             '-i', 'source.video', '-sub_charenc', 'UTF-8', '-i', 'sinhala.srt',
@@ -290,10 +463,41 @@ def soft_mp4_args(streams, audio_map, duration, crf):
         index = int(audio_map.split(':')[-1].rstrip('?'))
         selected = audio[index]
         args += ['-c:a', 'copy'] if selected.get('codec_name') == 'aac' else ['-c:a', 'aac', '-b:a', '192k']
-    args += ['-c:s', 'mov_text', '-metadata:s:s:0', 'language=sin',
-             '-metadata:s:s:0', 'title=Sinhala', '-disposition:s:0', '0',
+    args += ['-c:s', 'mov_text', '-metadata:s:s:0', 'language=' + language,
+             '-metadata:s:s:0', 'title=' + ('Sinhala' if language == 'sin' else 'English'), '-disposition:s:0', '0',
              '-t', str(duration), '-movflags', '+faststart']
     return args
+
+
+def transfer_mp4_args(streams, crf=23, preset='veryfast'):
+    video = next(s for s in streams if s.get('codec_type') == 'video')
+    args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', 'transfer.video', '-map', '0:v:0', '-map', '0:a?', '-map_metadata', '-1', '-map_chapters', '-1']
+    if video.get('codec_name') == 'h264':
+        print('H.264 video: copying into MP4 without re-encoding', flush=True)
+        args += ['-c:v', 'copy']
+    else:
+        print('Converting source video to H.264 for MP4 playback', flush=True)
+        args += ['-c:v', 'libx264', '-preset', preset, '-crf', str(crf), '-pix_fmt', 'yuv420p']
+    for index, audio in enumerate(s for s in streams if s.get('codec_type') == 'audio'):
+        if audio.get('codec_name') == 'aac':
+            args += [f'-c:a:{index}', 'copy']
+        else:
+            args += [f'-c:a:{index}', 'aac', f'-b:a:{index}', '384k' if int(audio.get('channels', 2)) > 2 else '192k']
+        language = audio.get('tags', {}).get('language', '')
+        if re.fullmatch('[a-z]{2,3}', language):
+            args += [f'-metadata:s:a:{index}', 'language=' + language]
+        args += [f'-disposition:a:{index}', 'default' if audio.get('disposition', {}).get('default') else '0']
+    text_codecs = {'subrip', 'ass', 'ssa', 'mov_text', 'webvtt', 'text'}
+    subtitles = [s for s in streams if s.get('codec_type') == 'subtitle']
+    retained = [s for s in subtitles if s.get('codec_name') in text_codecs]
+    for index, subtitle in enumerate(retained):
+        args += ['-map', '0:' + str(subtitle['index']), f'-c:s:{index}', 'mov_text']
+        language = subtitle.get('tags', {}).get('language', '')
+        if re.fullmatch('[a-z]{2,3}', language):
+            args += [f'-metadata:s:s:{index}', 'language=' + language]
+    if len(retained) != len(subtitles):
+        print('::warning::Image-based or unsupported source subtitles omitted because they cannot be converted to MP4 text subtitles.')
+    return args + ['-movflags', '+faststart']
 
 
 def audio_job_request(job_id, payload=None, sha=None):
@@ -372,6 +576,31 @@ def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monoton
     raise ValueError('Audio selection timed out')
 
 
+def external_subtitle_mapping(root=None):
+    layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    asset = layout.get('externalSubtitle')
+    if asset is None:
+        return {}
+    if os.getenv('SUBTITLE_METHOD', 'burn') != 'transfer' or not isinstance(asset, dict) or set(asset) != {'path', 'language', 'url'}:
+        raise ValueError('Invalid external subtitle metadata')
+    repo = os.getenv('GITHUB_REPOSITORY', '')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
+        raise ValueError('Invalid subtitle repository')
+    url = asset['url']
+    if not isinstance(url, str):
+        raise ValueError('Invalid subtitle URL')
+    match = re.fullmatch(r'https://raw\.githubusercontent\.com/' + re.escape(repo) + r'/([a-f0-9]{40})/(subtitles/jobs/[a-f0-9]{32}/sinhala\.srt)', url)
+    if not match or match.group(2) != asset['path'] or asset['language'] not in ('sin', 'eng'):
+        raise ValueError('Invalid subtitle URL or language')
+    if root is not None:
+        path = repository_file(root, asset['path'], '.srt', 1024**2)
+        text = path.read_text(encoding='utf-8-sig')
+        alphabet = r'[\u0d80-\u0dff]' if asset['language'] == 'sin' else r'[A-Za-z]'
+        if not re.search(alphabet, text) or not re.search(r'^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', text, re.M) or '\x00' in text or '\ufffd' in text:
+            raise ValueError('Invalid external SRT file')
+    return {'subtitle_url': url, 'subtitle_language': asset['language'], 'subtitle_format': 'srt'}
+
+
 def merge_mapping(rows, identity, file_id):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError('Invalid mappings file')
@@ -379,6 +608,41 @@ def merge_mapping(rows, identity, file_id):
     item = dict(identity, file_id=file_id)
     match = lambda row: all(row.get(k) == item[k] for k in ('type', key, 'season', 'episode'))
     return [row for row in rows if not match(row)] + [item]
+
+
+def mapping_password():
+    password = os.getenv('MAPPING_PASSWORD', '')
+    if not password:
+        raise DownloadError('MAPPING_PASSWORD is missing. Set the same password in GitHub Actions secrets and Vercel environment variables.')
+    mask(password)
+    return password.encode('utf-8')
+
+
+def encrypt_mappings(rows):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    salt, nonce = os.urandom(16), os.urandom(12)
+    key = hashlib.pbkdf2_hmac('sha256', mapping_password(), salt, 600000, 32)
+    encrypted = AESGCM(key).encrypt(nonce, json.dumps(rows, ensure_ascii=False).encode('utf-8'), b'CLIXARENA-mappings-v1')
+    return {'version': 1, 'algorithm': 'AES-256-GCM', 'kdf': 'PBKDF2-SHA256', 'iterations': 600000,
+            'salt': base64.b64encode(salt).decode(), 'nonce': base64.b64encode(nonce).decode(), 'ciphertext': base64.b64encode(encrypted).decode()}
+
+
+def decrypt_mappings(document):
+    if isinstance(document, list):
+        return document  # Migrate the current plaintext file on its next update.
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if not isinstance(document, dict) or document.get('version') != 1 or document.get('algorithm') != 'AES-256-GCM' or document.get('kdf') != 'PBKDF2-SHA256' or document.get('iterations') != 600000:
+        raise ValueError('Invalid encrypted mapping format')
+    salt = base64.b64decode(document['salt'], validate=True)
+    nonce = base64.b64decode(document['nonce'], validate=True)
+    if len(salt) != 16 or len(nonce) != 12:
+        raise ValueError('Invalid mapping encryption parameters')
+    key = hashlib.pbkdf2_hmac('sha256', mapping_password(), salt, 600000, 32)
+    plaintext = AESGCM(key).decrypt(nonce, base64.b64decode(document['ciphertext'], validate=True), b'CLIXARENA-mappings-v1')
+    rows = json.loads(plaintext)
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError('Invalid decrypted mapping')
+    return rows
 
 
 def save_mapping(file_id):
@@ -395,8 +659,9 @@ def save_mapping(file_id):
         raise ValueError('Invalid mapping numbers')
     if kind == 'movie' and (identity['season'] or identity['episode']) or kind != 'movie' and identity['episode'] < 1:
         raise ValueError('Invalid mapping episode')
+    identity = dict(identity, **external_subtitle_mapping())
     backup = Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'mapping-result.json'
-    backup.write_text(json.dumps([dict(identity, file_id=file_id)], indent=2) + '\n', encoding='utf-8')
+    backup.write_text(json.dumps(encrypt_mappings([dict(identity, file_id=file_id)]), indent=2) + '\n', encoding='utf-8')
     repo = os.getenv('GITHUB_REPOSITORY', '')
     token = os.getenv('MAPPING_GITHUB_TOKEN', '')
     ref = os.getenv('GITHUB_REF_NAME', '')
@@ -412,15 +677,16 @@ def save_mapping(file_id):
             try:
                 with opener.open(request, timeout=60) as response:
                     current = json.loads(response.read(8 * 1024**2))
-                rows = json.loads(base64.b64decode(current['content']).decode('utf-8-sig'))
+                document = json.loads(base64.b64decode(current['content']).decode('utf-8-sig'))
+                rows = decrypt_mappings(document)
             except urllib.error.HTTPError as error:
                 if error.code != 404:
                     raise
                 current, rows = None, []
             merged = merge_mapping(rows, identity, file_id)
-            content = json.dumps(merged, indent=2) + '\n'
+            content = json.dumps(encrypt_mappings(merged), indent=2) + '\n'
             backup.write_text(content, encoding='utf-8')
-            if rows == merged:
+            if rows == merged and current and not isinstance(document, list):
                 return
             payload = {'message': 'Update CLIXARENA video mapping', 'branch': ref, 'content': base64.b64encode(content.encode()).decode()}
             if current:
@@ -473,6 +739,9 @@ def main():
         if method != 'burn':
             os.environ['TITLE_ANIMATION'] = 'false'
         options = settings()
+        if json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}').get('mapping') and not sample_only:
+            mapping_password()
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         tmdb_token = os.getenv('TMDB_READ_TOKEN', '')
         mask(tmdb_token)
         for value in values.values():
@@ -496,35 +765,44 @@ def main():
         if len(overlay_name.encode('utf-8')) > 500 or re.search(r'[\x00-\x1f\x7f]', overlay_name):
             raise ValueError('Invalid display title')
         if method == 'transfer':
+            stage = 'optional external subtitle validation'
+            external_subtitle_mapping(Path.cwd().resolve())
             stage = 'original video download'
             with tempfile.TemporaryDirectory(prefix='clixarena-transfer-') as directory:
                 original = Path.cwd()
                 os.chdir(directory)
                 try:
-                    print('Downloading original video; no subtitle or encoding step', flush=True)
+                    print('Downloading video for MP4 upload; no added subtitles or overlays', flush=True)
                     path = Path('transfer.video')
                     download(values['VIDEO_URL'], path, 12 * 1024**3)
                     stage = 'original video validation'
                     info = probe(str(path))
                     if not any(s.get('codec_type') == 'video' for s in info.get('streams', [])):
                         raise ValueError('Source is not a video')
-                    formats = info.get('format', {}).get('format_name', '').split(',')
-                    if 'mp4' in formats:
-                        extension = '.mp4'
-                    elif 'matroska' in formats:
-                        extension = '.mkv'
-                    else:
-                        raise ValueError('Download-only method supports original MP4/MKV containers')
-                    stem = re.sub(r'\.(mp4|mkv)$', '', output_name, flags=re.I)
-                    stage = 'Streamtape original video upload and filename update'
-                    complete_upload(path, stem + extension, values)
+                    try:
+                        duration = float(info['format']['duration'])
+                        if not 0 < duration < float('inf'):
+                            raise ValueError()
+                    except (KeyError, TypeError, ValueError):
+                        raise DownloadError('Source video has no valid duration metadata.') from None
+                    if shutil.disk_usage('.').free < path.stat().st_size * 2 + 2 * 1024**3:
+                        raise DownloadError('Insufficient runner disk space to prepare MP4.')
+                    stage = 'MP4 preparation without added subtitles'
+                    encode_progress(transfer_mp4_args(info['streams'], options['crf'], options['preset']), duration)
+                    output = probe('clixarena.mp4')
+                    if 'mp4' not in output.get('format', {}).get('format_name', '').split(',') or not any(s.get('codec_name') == 'h264' and s.get('codec_type') == 'video' for s in output['streams']) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in output['streams']):
+                        raise DownloadError('Prepared MP4 has unexpected container or codecs; upload stopped.')
+                    if abs(duration - float(output['format']['duration'])) > 2:
+                        raise DownloadError('Prepared MP4 duration differs from the source; upload stopped.')
+                    stage = 'Streamtape MP4 upload and filename update'
+                    complete_upload(Path('clixarena.mp4'), output_name, values)
                 finally:
                     os.chdir(original)
             return 0
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
         srt_path = subtitle_asset(root, values['SUBTITLE_PATH'])
-        font_path = repository_file(root, values['FONT_PATH'], '.ttf', 30 * 1024**2) if method == 'burn' else None
+        font_path = selected_font_file(root, values['FONT_PATH']) if method == 'burn' else None
         algerian_path = None
         if options['parts']['name']:
             algerian_path = repository_file(root, 'fonts/Algerian.ttf', '.ttf', 30 * 1024**2)
@@ -537,23 +815,30 @@ def main():
                 shutil.copyfile(srt_path, 'sinhala.srt')
                 # Every uploaded name is normalized in the runner, without changing repository files.
                 shutil.copyfile('sinhala.srt', 'subtitles.srt')
-                print('Subtitle loaded as sinhala.srt', flush=True)
+                language = options['subtitle_language']
+                language_name = 'Sinhala' if language == 'sin' else 'English'
+                print(language_name + ' subtitle loaded', flush=True)
                 subtitle = Path('sinhala.srt').read_text(encoding='utf-8-sig')
-                if not re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', subtitle) or not re.search('[\u0d80-\u0dff]', subtitle):
-                    raise ValueError('SRT must contain valid timestamps and Unicode Sinhala text')
+                if not re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', subtitle) or '\x00' in subtitle or '\ufffd' in subtitle or (language == 'sin' and not re.search('[\u0d80-\u0dff]', subtitle)) or (language == 'eng' and not re.search('[A-Za-z]', subtitle)):
+                    raise DownloadError('SRT must contain valid timestamps and text in the selected subtitle language.')
                 if method == 'burn':
                     Path('fonts').mkdir()
-                    shutil.copyfile(font_path, 'fonts/iskoola.ttf')
-                    family = command(['fc-scan', '--format', '%{family}', 'fonts/iskoola.ttf'])
-                    if 'Iskoola Pota' not in family.split(','):
-                        raise ValueError('Font file does not identify as Iskoola Pota')
-                    validate_sinhala_font('fonts/iskoola.ttf')
+                    local_font = Path('fonts/selected' + font_path.suffix.lower())
+                    shutil.copyfile(font_path, local_font)
+                    family = validate_selected_font(local_font, subtitle, language)
+                    if options['parts']['message']:
+                        if language == 'sin':
+                            options['layout']['messageFont'] = family
+                        else:
+                            message_font = selected_font_file(original, 'system:noto-sinhala')
+                            shutil.copyfile(message_font, 'fonts/message.ttf')
+                            options['layout']['messageFont'] = validate_selected_font('fonts/message.ttf', options['layout']['message'], 'sin')
                     if algerian_path:
                         shutil.copyfile(algerian_path, 'fonts/algerian.ttf')
                         if 'Algerian' not in command(['fc-scan', '--format', '%{family}', 'fonts/algerian.ttf']).split(','):
                             print('::error::fonts/Algerian.ttf must be the Algerian font. No font substitution is used.')
                             raise ValueError('Invalid Algerian font')
-                    prepare_ass()
+                    prepare_ass(family)
                     shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
                         '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
                         'ass=subtitles.ass:fontsdir=fonts:shaping=complex', '-frames:v', '1', '-f', 'null', '-'],
@@ -561,7 +846,7 @@ def main():
                     if shaping_test.returncode or not re.search(r'HarfBuzz.*\(COMPLEX\)', shaping_test.stderr):
                         print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
                         raise ValueError('Complex shaping unavailable')
-                    print('Sinhala rendering: HarfBuzz complex shaping enabled', flush=True)
+                    print('Subtitle rendering: HarfBuzz complex shaping enabled', flush=True)
                 logo_size = None
                 if options['parts']['logo']:
                     stage = 'English TMDB original logo'
@@ -609,13 +894,13 @@ def main():
                 else:
                     logo_size = None
                 if method == 'soft':
-                    stage = 'MP4 with Sinhala-only switchable subtitles'
-                    args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'])
-                    print('Preparing MP4 with one Sinhala subtitle track; removing all source subtitle tracks', flush=True)
+                    stage = 'MP4 with selected switchable subtitles'
+                    args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'], language)
+                    print('Preparing MP4 with one ' + language_name + ' subtitle track; removing all source subtitle tracks', flush=True)
                     encode_progress(args, expected_duration)
                 else:
                     stage = 'encoding'
-                    print('Encoding H.264/AAC with Sinhala subtitles and watermark', flush=True)
+                    print('Encoding H.264/AAC with ' + language_name + ' subtitles and watermark', flush=True)
                     filters = filter_graph(width, height, options, logo_size)
                     inputs = ['-i', 'source.video']
                     if logo_size:
@@ -634,11 +919,11 @@ def main():
                     raise ValueError('Encoded duration differs from source')
                 if method == 'soft':
                     subtitles = [s for s in streams if s.get('codec_type') == 'subtitle']
-                    if len(subtitles) != 1 or subtitles[0].get('codec_name') != 'mov_text' or subtitles[0].get('tags', {}).get('language') != 'sin':
-                        raise ValueError('Output must contain only one Sinhala subtitle track')
+                    if len(subtitles) != 1 or subtitles[0].get('codec_name') != 'mov_text' or subtitles[0].get('tags', {}).get('language') != language:
+                        raise ValueError('Output must contain only the selected subtitle track')
                     preview = original / 'preview'
                     preview.mkdir(exist_ok=True)
-                    shutil.copyfile('sinhala.srt', preview / 'sinhala.srt')
+                    shutil.copyfile('sinhala.srt', preview / 'subtitle.srt')
                 if sample_only:
                     stage = 'sample export'
                     preview = original / 'preview'

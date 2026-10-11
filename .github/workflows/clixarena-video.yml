@@ -21,7 +21,7 @@ on:
         type: string
         required: false
       subtitle_method:
-        description: Burn or Sinhala-only switchable subtitles in MP4
+        description: Burn, selected-language on/off subtitles, or MP4 upload without added subtitles
         required: true
         type: choice
         default: burn
@@ -40,7 +40,7 @@ on:
         required: true
         type: string
       font_path:
-        description: Repository path to licensed Iskoola Pota TTF
+        description: Font TTF/OTF path in fonts/ or system:noto-sinhala / system:dejavu-sans / system:dejavu-serif
         default: fonts/IskoolaPota.ttf
         required: true
         type: string
@@ -123,10 +123,11 @@ jobs:
           ref: ${{ inputs.source_commit || github.sha }}
           persist-credentials: false
       - name: Install media tools
-        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg fontconfig fonts-dejavu-core
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg fontconfig fonts-dejavu-core fonts-noto-core python3-cryptography
       - name: Download, validate, encode and upload
         id: video
         env:
+          MAPPING_PASSWORD: ${{ secrets.MAPPING_PASSWORD }}
           MAPPING_GITHUB_TOKEN: ${{ github.token }}
           VIDEO_URL: ${{ inputs.video_url }}
           OVERLAY_LAYOUT: ${{ inputs.overlay_layout }}
@@ -167,14 +168,14 @@ jobs:
           path: preview/sample.mp4
           if-no-files-found: error
           retention-days: 3
-      - name: Sinhala subtitle companion
+      - name: Selected subtitle companion
         if: ${{ inputs.subtitle_method == 'soft' && success() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: CLIXARENA-Sinhala-subtitle
-          path: preview/sinhala.srt
+          name: CLIXARENA-subtitle
+          path: preview/subtitle.srt
           if-no-files-found: error
           retention-days: 3
       - name: Failure guidance
         if: failure()
-        run: echo '::error::Check the stage message above. Verify video URL, repository SRT/font paths, UTF-8 SRT, licensed Iskoola Pota font, disk space and Streamtape secrets. Uploads are not retried automatically; check your Streamtape account before rerunning.'
+        run: echo '::error::Check the stage message above. Verify video URL, repository SRT/font paths, UTF-8 SRT, selected language and font support, disk space and Streamtape secrets. Uploads are not retried automatically; check your Streamtape account before rerunning.'

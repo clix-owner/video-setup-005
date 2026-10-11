@@ -51,6 +51,9 @@ def settings():
     if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
         raise ValueError('TMDB URL required for enabled logo')
     layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    subtitle_language = layout.get('subtitleLanguage', 'sin')
+    if subtitle_language not in ('sin', 'eng'):
+        raise ValueError('Subtitle language must be Sinhala or English')
     logo_scale = number(layout.get('logoScale', 100), 25, 200, 'logo size')
     preset = layout.get('preset', 'veryfast')
     if preset not in ('fast', 'veryfast', 'superfast', 'ultrafast'):
@@ -70,7 +73,7 @@ def settings():
             raise ValueError('Invalid overlay text color')
         styles[key] = {'size': number(style.get('size', default), 8, 160, 'overlay font size'), 'color': color.upper()}
     return {'layout': {'positions': positions, 'message': message, 'styles': styles, 'logoScale': logo_scale}, 'parts': parts, 'preset': preset, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
-            'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
+            'subtitle_language': subtitle_language, 'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
 
@@ -169,6 +172,8 @@ Style: Message,Iskoola Pota,36,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 '''
+    message_font = (layout or {}).get('messageFont', 'Iskoola Pota')
+    styles = styles.replace('Style: Message,Iskoola Pota,', 'Style: Message,' + message_font + ',')
     text_styles = (layout or {}).get('styles', {})
     for key, label, default in [('name', 'Name', 54), ('message', 'Message', 36)]:
         style = text_styles.get(key, {'size': default, 'color': '#FFFFFF'})
