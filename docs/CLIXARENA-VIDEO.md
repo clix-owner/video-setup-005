@@ -1,3 +1,5 @@
+Release 2026.10.11-r4: MAPPING_PASSWORD must match the portal environment variable. Current mappings are encrypted by the portal Lock existing mappings.json button or the next successful updated mapping job. Plaintext public history is unchanged.
+
 # CLIXARENA advanced workflow
 
 Upload all ZIP contents to the repository root, preserving paths. Replace the workflow and BOTH Python scripts together. Files do not trigger a run; use Run workflow manually.

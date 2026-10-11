@@ -729,6 +729,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
+    print('CLIXARENA pipeline version 2026.10.11-r4', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
