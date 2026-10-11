@@ -604,7 +604,7 @@ def external_subtitle_mapping(root=None):
 def merge_mapping(rows, identity, file_id):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError('Invalid mappings file')
-    key = 'anilist_id' if identity['type'] == 'anime' else 'tmdb_id'
+    key = ('mal_id' if 'mal_id' in identity else 'anilist_id') if identity['type'] == 'anime' else 'tmdb_id'
     item = dict(identity, file_id=file_id)
     match = lambda row: all(row.get(k) == item[k] for k in ('type', key, 'season', 'episode'))
     return [row for row in rows if not match(row)] + [item]
@@ -650,7 +650,7 @@ def save_mapping(file_id):
     if identity is None:
         return
     kind = identity.get('type')
-    key = 'anilist_id' if kind == 'anime' else 'tmdb_id'
+    key = ('mal_id' if 'mal_id' in identity else 'anilist_id') if kind == 'anime' else 'tmdb_id'
     if kind not in ('movie', 'tv', 'anime') or set(identity) not in ({'type', key, 'season', 'episode'}, {'type', key, 'season', 'episode', 'name'}):
         raise ValueError('Invalid mapping identity')
     if 'name' in identity and (not isinstance(identity['name'], str) or not identity['name'].strip() or len(identity['name'].encode('utf-8')) > 1500 or re.search(r'[\x00-\x1f\x7f]', identity['name'])):
@@ -729,7 +729,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.11-r4', flush=True)
+    print('CLIXARENA pipeline version 2026.10.11-r5', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
