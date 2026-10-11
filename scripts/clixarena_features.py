@@ -51,6 +51,9 @@ def settings():
     if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
         raise ValueError('TMDB URL required for enabled logo')
     layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    subtitle_enabled = layout.get('subtitleEnabled', True)
+    if type(subtitle_enabled) is not bool:
+        raise ValueError('Invalid subtitle enable option')
     subtitle_language = layout.get('subtitleLanguage', 'sin')
     if subtitle_language not in ('sin', 'eng'):
         raise ValueError('Subtitle language must be Sinhala or English')
@@ -73,7 +76,7 @@ def settings():
             raise ValueError('Invalid overlay text color')
         styles[key] = {'size': number(style.get('size', default), 8, 160, 'overlay font size'), 'color': color.upper()}
     return {'layout': {'positions': positions, 'message': message, 'styles': styles, 'logoScale': logo_scale}, 'parts': parts, 'preset': preset, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
-            'subtitle_language': subtitle_language, 'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
+            'subtitle_enabled': subtitle_enabled, 'subtitle_language': subtitle_language, 'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
 
@@ -225,7 +228,9 @@ def logo_dimensions(width, height, logo_size, scale=100):
 
 
 def filter_graph(width, height, options, logo_size=None):
-    base = f'[0:v:0]scale={width}:{height}:flags=lanczos,setsar=1,ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
+    base = f'[0:v:0]scale={width}:{height}:flags=lanczos,setsar=1,'
+    if options.get('subtitle_enabled', True):
+        base += 'ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
     base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'
     text = any(options.get('parts', {'name': bool(logo_size), 'message': bool(logo_size)})[key] for key in ('name', 'message'))
     if not logo_size:

@@ -729,7 +729,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.11-r5', flush=True)
+    print('CLIXARENA pipeline version 2026.10.11-r6', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
@@ -743,11 +743,14 @@ def main():
         if json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}').get('mapping') and not sample_only:
             mapping_password()
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        burn_subtitles = method != 'burn' or options['subtitle_enabled']
         tmdb_token = os.getenv('TMDB_READ_TOKEN', '')
         mask(tmdb_token)
         for value in values.values():
             mask(value)
         required = ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH') if sample_only else tuple(values)
+        if method == 'burn' and not burn_subtitles:
+            required = tuple(name for name in required if name not in ('SUBTITLE_PATH', 'FONT_PATH'))
         if method == 'soft':
             required = tuple(name for name in required if name != 'FONT_PATH')
         if method == 'transfer':
@@ -802,8 +805,8 @@ def main():
             return 0
         stage = 'repository subtitle and font availability'
         root = Path.cwd().resolve()
-        srt_path = subtitle_asset(root, values['SUBTITLE_PATH'])
-        font_path = selected_font_file(root, values['FONT_PATH']) if method == 'burn' else None
+        srt_path = subtitle_asset(root, values['SUBTITLE_PATH']) if burn_subtitles else None
+        font_path = selected_font_file(root, values['FONT_PATH']) if method == 'burn' and burn_subtitles else None
         algerian_path = None
         if options['parts']['name']:
             algerian_path = repository_file(root, 'fonts/Algerian.ttf', '.ttf', 30 * 1024**2)
@@ -812,23 +815,27 @@ def main():
             os.chdir(directory)
             try:
                 stage = 'subtitle and font validation'
-                print('Checking subtitle and font', flush=True)
-                shutil.copyfile(srt_path, 'sinhala.srt')
-                # Every uploaded name is normalized in the runner, without changing repository files.
-                shutil.copyfile('sinhala.srt', 'subtitles.srt')
                 language = options['subtitle_language']
                 language_name = 'Sinhala' if language == 'sin' else 'English'
-                print(language_name + ' subtitle loaded', flush=True)
-                subtitle = Path('sinhala.srt').read_text(encoding='utf-8-sig')
-                if not re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', subtitle) or '\x00' in subtitle or '\ufffd' in subtitle or (language == 'sin' and not re.search('[\u0d80-\u0dff]', subtitle)) or (language == 'eng' and not re.search('[A-Za-z]', subtitle)):
-                    raise DownloadError('SRT must contain valid timestamps and text in the selected subtitle language.')
+                if burn_subtitles:
+                    print('Checking subtitle and font', flush=True)
+                    shutil.copyfile(srt_path, 'sinhala.srt')
+                    # Every uploaded name is normalized in the runner, without changing repository files.
+                    shutil.copyfile('sinhala.srt', 'subtitles.srt')
+                    print(language_name + ' subtitle loaded', flush=True)
+                    subtitle = Path('sinhala.srt').read_text(encoding='utf-8-sig')
+                    if not re.search(r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', subtitle) or '\x00' in subtitle or '\ufffd' in subtitle or (language == 'sin' and not re.search('[\u0d80-\u0dff]', subtitle)) or (language == 'eng' and not re.search('[A-Za-z]', subtitle)):
+                        raise DownloadError('SRT must contain valid timestamps and text in the selected subtitle language.')
+                else:
+                    print('Subtitle burn disabled; no SRT or subtitle font required', flush=True)
                 if method == 'burn':
                     Path('fonts').mkdir()
-                    local_font = Path('fonts/selected' + font_path.suffix.lower())
-                    shutil.copyfile(font_path, local_font)
-                    family = validate_selected_font(local_font, subtitle, language)
+                    if burn_subtitles:
+                        local_font = Path('fonts/selected' + font_path.suffix.lower())
+                        shutil.copyfile(font_path, local_font)
+                        family = validate_selected_font(local_font, subtitle, language)
                     if options['parts']['message']:
-                        if language == 'sin':
+                        if burn_subtitles and language == 'sin':
                             options['layout']['messageFont'] = family
                         else:
                             message_font = selected_font_file(original, 'system:noto-sinhala')
@@ -839,15 +846,16 @@ def main():
                         if 'Algerian' not in command(['fc-scan', '--format', '%{family}', 'fonts/algerian.ttf']).split(','):
                             print('::error::fonts/Algerian.ttf must be the Algerian font. No font substitution is used.')
                             raise ValueError('Invalid Algerian font')
-                    prepare_ass(family)
-                    shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
-                        '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
-                        'ass=subtitles.ass:fontsdir=fonts:shaping=complex', '-frames:v', '1', '-f', 'null', '-'],
-                        capture_output=True, text=True, timeout=60)
-                    if shaping_test.returncode or not re.search(r'HarfBuzz.*\(COMPLEX\)', shaping_test.stderr):
-                        print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
-                        raise ValueError('Complex shaping unavailable')
-                    print('Subtitle rendering: HarfBuzz complex shaping enabled', flush=True)
+                    if burn_subtitles:
+                        prepare_ass(family)
+                        shaping_test = subprocess.run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'info',
+                            '-f', 'lavfi', '-i', 'color=s=320x180:d=0.1', '-vf',
+                            'ass=subtitles.ass:fontsdir=fonts:shaping=complex', '-frames:v', '1', '-f', 'null', '-'],
+                            capture_output=True, text=True, timeout=60)
+                        if shaping_test.returncode or not re.search(r'HarfBuzz.*\(COMPLEX\)', shaping_test.stderr):
+                            print('::error::FFmpeg/libass complex HarfBuzz shaping is unavailable. Use a build with libass and HarfBuzz.')
+                            raise ValueError('Complex shaping unavailable')
+                        print('Subtitle rendering: HarfBuzz complex shaping enabled', flush=True)
                 logo_size = None
                 if options['parts']['logo']:
                     stage = 'English TMDB original logo'
@@ -901,7 +909,7 @@ def main():
                     encode_progress(args, expected_duration)
                 else:
                     stage = 'encoding'
-                    print('Encoding H.264/AAC with ' + language_name + ' subtitles and watermark', flush=True)
+                    print('Encoding H.264/AAC with watermark' + (' and ' + language_name + ' subtitles' if burn_subtitles else '; subtitles disabled'), flush=True)
                     filters = filter_graph(width, height, options, logo_size)
                     inputs = ['-i', 'source.video']
                     if logo_size:

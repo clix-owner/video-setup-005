@@ -1,4 +1,4 @@
-Release 2026.10.11-r5: MAPPING_PASSWORD must match the portal environment variable. Current mappings are encrypted by the portal Lock existing mappings.json button or the next successful updated mapping job. Plaintext public history is unchanged.
+Release 2026.10.11-r6: MAPPING_PASSWORD must match the portal environment variable. Current mappings are encrypted by the portal Lock existing mappings.json button or the next successful updated mapping job. Plaintext public history is unchanged.
 
 # CLIXARENA advanced workflow
 
@@ -112,3 +112,5 @@ After deployment, sign in and click Lock existing mappings.json to encrypt the c
 
 
 Anime metadata now uses the official MyAnimeList API v2. Set MAL_CLIENT_ID in Vercel environment variables (your own registered MAL app client ID); it is sent server-side only as X-MAL-CLIENT-ID. No MAL secret is needed in GitHub Actions. Anime input IDs and new mappings use mal_id; names prefer alternative_titles.en then MAL title. Each MAL anime entry has its own ID; season is stored as 1 and episode uses the MAL episode count, with manual episode entry when unknown. Legacy anilist_id mappings are preserved but never reinterpreted or converted by numeric ID; resubmit with the correct MAL ID to create a new MAL mapping. Movie/TV still use TMDB.
+
+Burn subtitles checkbox defaults ON. Turning it OFF skips uploaded SRT and subtitle font requirements, keeps H.264/AAC encoding, resolution/quality settings, CLIXARENA watermark and enabled title overlays, and strips source subtitle tracks. Enabled text overlays still need their own fonts. Manual Actions can set overlay_layout={"subtitleEnabled":false}. Soft/on-off subtitle mode remains mandatory-SRT; transfer optional external SRT is unchanged.
