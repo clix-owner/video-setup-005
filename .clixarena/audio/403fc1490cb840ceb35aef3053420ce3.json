@@ -1,1 +1,1 @@
-{"job": "403fc1490cb840ceb35aef3053420ce3", "run_id": "38269820921", "status": "waiting_audio", "tracks": [{"index": 0, "language": "mal", "channels": 6, "codec": "ac3"}, {"index": 1, "language": "mal", "channels": 2, "codec": "aac"}]}
+{"job":"403fc1490cb840ceb35aef3053420ce3","run_id":"38269820921","status":"selected","tracks":[{"index":0,"language":"mal","channels":6,"codec":"ac3"},{"index":1,"language":"mal","channels":2,"codec":"aac"}],"selected":1}
