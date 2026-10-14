@@ -22,6 +22,13 @@ import urllib.parse
 import urllib.request
 from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
                                 write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
+from clixarena_torrent import TorrentError, download_torrent
+
+def download_source(url,target,limit,root):
+    descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
+    if descriptor is None:return download(url,target,limit)
+    if not isinstance(descriptor,dict):raise TorrentError('Invalid torrent source metadata.')
+    return download_torrent(descriptor,target,limit,root,audio_job_request)
 
 
 def mask(value):
@@ -500,13 +507,14 @@ def transfer_mp4_args(streams, crf=23, preset='veryfast'):
     return args + ['-movflags', '+faststart']
 
 
-def audio_job_request(job_id, payload=None, sha=None):
+def audio_job_request(job_id, payload=None, sha=None, state_dir='audio'):
     repo = os.getenv('GITHUB_REPOSITORY', '')
     token = os.getenv('MAPPING_GITHUB_TOKEN', '')
     ref = os.getenv('GITHUB_REF_NAME', '')
     if not re.fullmatch(r'[a-f0-9]{32}', job_id) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not token or not ref:
         raise ValueError('Audio selection portal configuration missing')
-    endpoint = 'https://api.github.com/repos/' + repo + '/contents/.clixarena/audio/' + job_id + '.json'
+    if state_dir not in ('audio','torrent'):raise ValueError('Invalid selection state folder')
+    endpoint = 'https://api.github.com/repos/' + repo + '/contents/.clixarena/' + state_dir + '/' + job_id + '.json'
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
     if payload is None:
         request = urllib.request.Request(endpoint + '?ref=' + urllib.parse.quote(ref, safe=''), headers=headers)
@@ -524,7 +532,7 @@ def audio_job_request(job_id, payload=None, sha=None):
             if payload is None or error.code != 409 or attempt == 11:
                 raise
             time.sleep(random.uniform(0.15, 1.0) * min(3, 1 + attempt // 4))
-            current = audio_job_request(job_id)
+            current = audio_job_request(job_id,state_dir=state_dir)
             body['sha'] = current['sha']
             request = urllib.request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method='PUT')
 
@@ -729,7 +737,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.11-r6', flush=True)
+    print('CLIXARENA pipeline version 2026.10.14-torrent', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
@@ -778,7 +786,7 @@ def main():
                 try:
                     print('Downloading video for MP4 upload; no added subtitles or overlays', flush=True)
                     path = Path('transfer.video')
-                    download(values['VIDEO_URL'], path, 12 * 1024**3)
+                    download_source(values['VIDEO_URL'], path, 12 * 1024**3, original.resolve())
                     stage = 'original video validation'
                     info = probe(str(path))
                     if not any(s.get('codec_type') == 'video' for s in info.get('streams', [])):
@@ -869,7 +877,7 @@ def main():
                     write_intro(overlay_name, options['start'], options['duration'], options['parts'], options['layout'])
                 stage = 'video download and validation'
                 print('Downloading video', flush=True)
-                download(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3)
+                download_source(values['VIDEO_URL'], Path('source.video'), 12 * 1024**3, root)
                 source = probe('source.video')
                 if not any(s['codec_type'] == 'video' for s in source['streams']):
                     raise DownloadError('Downloaded file contains no video stream.')
@@ -947,7 +955,7 @@ def main():
                 complete_upload(Path('clixarena.mp4'), output_name, values)
             finally:
                 os.chdir(original)
-    except DownloadError as error:
+    except (DownloadError,TorrentError) as error:
         print('::error::' + str(error))
         return 1
     except Exception:
