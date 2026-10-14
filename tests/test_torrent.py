@@ -48,6 +48,8 @@ class Tests(unittest.TestCase):
     if flag!=1:raise AssertionError('Unverified blocks must not count')
     return [0,0,200]
    def pause(self):pass
+   def force_reannounce(self):pass
+   def force_dht_announce(self):pass
   h=Handle()
   class Session:
    def __init__(self,settings):pass
@@ -67,4 +69,16 @@ class Tests(unittest.TestCase):
     self.assertEqual(Path('source.video').read_bytes(),b'x'*200)
     self.assertFalse(Path('.torrent-payload',renames[0]).exists());self.assertEqual(len(removed),1)
    finally:os.chdir(previous)
+ def test_trackers_allow_public_udp_but_block_private_http_and_credentials(self):
+  def resolver(host,port,**kwargs):return [(2,2,17,'',('127.0.0.1' if host=='private.test' else '8.8.8.8',port))]
+  values=['udp://public.test:1337/announce','udp://private.test:1337/announce','https://public.test/announce','udp://user:pass@public.test:1337/announce','udp://public.test:1337/announce?passkey=secret']
+  result=t.public_trackers(values,resolver)
+  self.assertIn(values[0],result)
+  for value in values[1:]:self.assertNotIn(value,result)
+ def test_discovery_diagnostics_never_echo_raw_tracker_errors(self):
+  error=type('tracker_error_alert',(),{'message':lambda self:'SECRET-URL'})()
+  reply=type('tracker_reply_alert',(),{})()
+  session=NS(pop_alerts=lambda:[error,reply],status=lambda:NS(dht_nodes=42));counters={'errors':0,'replies':0}
+  output=t.discovery(session,None,None,counters)
+  self.assertIn('DHT nodes 42',output);self.assertIn('tracker replies 1',output);self.assertNotIn('SECRET',output)
 if __name__ == "__main__": unittest.main()
