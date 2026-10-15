@@ -267,6 +267,43 @@ def probe(path):
         raise DownloadError('Media validation returned invalid metadata.') from None
 
 
+def packet_video_duration(lines, start=0.0):
+    import math
+    end=None
+    for line in lines:
+        fields=dict(part.split('=',1) for part in line.strip().split('|') if '=' in part)
+        try:
+            pts=float(fields.get('pts_time','nan'))
+            duration=float(fields.get('duration_time','0'))
+        except ValueError:continue
+        if not math.isfinite(pts):continue
+        if not math.isfinite(duration) or duration<0:duration=0
+        value=pts+duration
+        end=value if end is None else max(end,value)
+    if end is None or end<=start:raise DownloadError('Could not determine the actual video timeline; upload stopped.')
+    return end-start
+
+
+def actual_video_duration(path,info):
+    import threading
+    video=next((s for s in info['streams'] if s.get('codec_type')=='video'),None)
+    if video is None:raise DownloadError('No video stream was found.')
+    try:start=float(video.get('start_time',0))
+    except (ValueError,TypeError):start=0.0
+    print('Checking actual video timeline; source subtitle padding is excluded',flush=True)
+    process=subprocess.Popen(['ffprobe','-v','error','-select_streams','v:0','-show_packets',
+        '-show_entries','packet=pts_time,duration_time','-of','compact=p=0',str(path)],
+        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    timer=threading.Timer(300,process.kill);timer.start()
+    try:
+        duration=packet_video_duration(process.stdout,start)
+        if process.wait()!=0:raise DownloadError('Actual video timeline scan failed or timed out; upload stopped.')
+        return duration
+    finally:
+        timer.cancel()
+        if process.poll() is None:process.kill();process.wait()
+
+
 def repository_file(root, value, suffix, limit):
     relative = Path(value)
     if relative.is_absolute() or '..' in relative.parts:
@@ -771,7 +808,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.14-torrent', flush=True)
+    print('CLIXARENA pipeline version 2026.10.15-video-timeline', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
@@ -826,7 +863,7 @@ def main():
                     if not any(s.get('codec_type') == 'video' for s in info.get('streams', [])):
                         raise ValueError('Source is not a video')
                     try:
-                        duration = float(info['format']['duration'])
+                        duration = actual_video_duration('transfer.video', info)
                         if not 0 < duration < float('inf'):
                             raise ValueError()
                     except (KeyError, TypeError, ValueError):
@@ -919,7 +956,8 @@ def main():
                 if shutil.disk_usage('.').free < Path('source.video').stat().st_size * 2 + 2 * 1024**3:
                     raise DownloadError('Insufficient runner disk space for encoding: twice the source size plus a 2 GB reserve is required.')
                 try:
-                    source_duration = float(source['format']['duration'])
+                    source_duration = actual_video_duration('source.video', source)
+                    print(f'Actual video duration: {source_duration:.3f}s (container metadata {float(source["format"]["duration"]):.3f}s)',flush=True)
                     if not 0 < source_duration < float('inf'):
                         raise ValueError()
                 except (KeyError, TypeError, ValueError):
