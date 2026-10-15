@@ -1,0 +1,27 @@
+name: CLIXARENA mapping sync
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: clixarena-mapping-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install encryption dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y python3-cryptography
+      - name: Remove only confirmed deleted video mappings
+        env:
+          MAPPING_PASSWORD: ${{ secrets.MAPPING_PASSWORD }}
+          MAPPING_GITHUB_TOKEN: ${{ github.token }}
+          STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
+          STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
+        run: python3 scripts/clixarena_mapping_sync.py
