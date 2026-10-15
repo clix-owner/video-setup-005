@@ -26,9 +26,39 @@ from clixarena_torrent import TorrentError, download_torrent
 
 def download_source(url,target,limit,root):
     descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
-    if descriptor is None:return download(url,target,limit)
-    if not isinstance(descriptor,dict):raise TorrentError('Invalid torrent source metadata.')
-    return download_torrent(descriptor,target,limit,root,audio_job_request)
+    if descriptor is not None:
+        if not isinstance(descriptor,dict):raise TorrentError('Invalid torrent source metadata.')
+        return download_torrent(descriptor,target,limit,root,audio_job_request)
+    for attempt in range(4):
+        try:return download(url,target,limit)
+        except ExpiredDownloadError:
+            if attempt == 3:raise DownloadError('Replacement URL was rejected repeatedly; download stopped.') from None
+            url=wait_for_download_url()
+
+
+def wait_for_download_url():
+    job=os.getenv('PORTAL_JOB_ID','')
+    if not re.fullmatch('[a-f0-9]{32}',job):
+        raise DownloadError('Download URL expired or access was denied. Submit a fresh URL in a new portal request.')
+    request_id=os.urandom(16).hex()
+    state={'job':job,'run_id':os.getenv('GITHUB_RUN_ID',''),'status':'waiting_url','request':request_id}
+    audio_job_request(job,state,state_dir='download')
+    print('Download URL expired or access was denied. Enter a fresh URL in Vercel within 20 minutes; this same run is waiting.',flush=True)
+    deadline=time.monotonic()+1200
+    while time.monotonic()<deadline:
+        time.sleep(15)
+        current=audio_job_request(job,state_dir='download')
+        value=json.loads(base64.b64decode(current['content']))
+        if value.get('job')!=job or value.get('run_id')!=state['run_id'] or value.get('request')!=request_id:continue
+        if value.get('status')!='selected':continue
+        rows=decrypt_mappings(value['encrypted'])
+        row=rows[0]
+        if row.get('job')!=job or row.get('run_id')!=state['run_id'] or row.get('request')!=request_id:
+            raise DownloadError('Replacement URL belongs to another request.')
+        url=row['url'];mask(url);validate_url(url)
+        audio_job_request(job,dict(state,status='downloading'),current['sha'],state_dir='download')
+        return url
+    raise DownloadError('Fresh download URL was not supplied within 20 minutes.')
 
 
 def mask(value):
@@ -66,6 +96,10 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedire
 class DownloadError(Exception):
     """Only fixed, credential-free messages may be used here."""
 
+
+
+class ExpiredDownloadError(DownloadError):
+    pass
 
 
 class RetryableDownloadError(DownloadError):
@@ -195,7 +229,7 @@ def _download_once(url, target, limit, opener=OPENER, drive_id=None):
     except urllib.error.HTTPError as error:
         hints = {401: 'Link requires authentication.', 403: 'Link expired, needs cookies, or the host blocked this runner.',
                  404: 'File was not found or the link expired.', 429: 'Host rate limit reached.'}
-        kind = RetryableDownloadError if error.code in (408, 429, 500, 502, 503, 504) else DownloadError
+        kind = ExpiredDownloadError if error.code in (401,403,404,410) else RetryableDownloadError if error.code in (408, 429, 500, 502, 503, 504) else DownloadError
         raise kind('Download HTTP ' + str(int(error.code)) + '. ' + hints.get(error.code, 'Video host rejected the download request.')) from None
     except urllib.error.URLError as error:
         if isinstance(error.reason, ssl.SSLError):
@@ -513,7 +547,7 @@ def audio_job_request(job_id, payload=None, sha=None, state_dir='audio'):
     ref = os.getenv('GITHUB_REF_NAME', '')
     if not re.fullmatch(r'[a-f0-9]{32}', job_id) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not token or not ref:
         raise ValueError('Audio selection portal configuration missing')
-    if state_dir not in ('audio','torrent'):raise ValueError('Invalid selection state folder')
+    if state_dir not in ('audio','torrent','download'):raise ValueError('Invalid selection state folder')
     endpoint = 'https://api.github.com/repos/' + repo + '/contents/.clixarena/' + state_dir + '/' + job_id + '.json'
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
     if payload is None:
@@ -801,6 +835,7 @@ def main():
                         raise DownloadError('Insufficient runner disk space to prepare MP4.')
                     stage = 'MP4 preparation without added subtitles'
                     encode_progress(transfer_mp4_args(info['streams'], options['crf'], options['preset']), duration)
+                    stage = 'output MP4 validation'
                     output = probe('clixarena.mp4')
                     if 'mp4' not in output.get('format', {}).get('format_name', '').split(',') or not any(s.get('codec_name') == 'h264' and s.get('codec_type') == 'video' for s in output['streams']) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in output['streams']):
                         raise DownloadError('Prepared MP4 has unexpected container or codecs; upload stopped.')
@@ -928,12 +963,13 @@ def main():
                              '-c:v', 'libx264', '-preset', options['preset'], '-crf', str(options['crf']),
                              '-pix_fmt', 'yuv420p'] + audio_encoding_args(source['streams'], audio_map) + [
                              '-t', str(expected_duration), '-movflags', '+faststart'], expected_duration)
+                stage = 'output MP4 validation'
                 output = probe('clixarena.mp4')
                 streams = output['streams']
                 if not any(s.get('codec_name') == 'h264' for s in streams) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in streams):
-                    raise ValueError('Encoded file has unexpected codecs')
+                    raise DownloadError('Output validation failed: expected H.264 video and AAC audio. Upload was not started.')
                 if abs(expected_duration - float(output['format']['duration'])) > 2:
-                    raise ValueError('Encoded duration differs from source')
+                    raise DownloadError(f'Output validation failed: source duration {expected_duration:.3f}s; MP4 duration {float(output["format"]["duration"]):.3f}s; difference exceeds 2 seconds. Upload was not started.')
                 if method == 'soft':
                     subtitles = [s for s in streams if s.get('codec_type') == 'subtitle']
                     if len(subtitles) != 1 or subtitles[0].get('codec_name') != 'mov_text' or subtitles[0].get('tags', {}).get('language') != language:
