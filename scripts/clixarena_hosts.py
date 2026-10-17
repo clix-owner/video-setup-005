@@ -32,58 +32,92 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):return None
 
 
+class HostError(ValueError):
+    """Only fixed text and numeric status codes may be exposed to job logs."""
+
+
+def _status(value):
+    return str(value) if type(value) is int and 100<=value<=599 else value if isinstance(value,str) and re.fullmatch(r'[1-5][0-9]{2}',value) else 'unknown'
+
+
 def streamhg_api(endpoint,key,params=None):
     if not key or len(key)>512 or any(ord(c)<33 for c in key):
-        raise ValueError('STREAMHG_API_KEY is missing or invalid')
+        raise HostError('StreamHG configuration: STREAMHG_API_KEY is missing or invalid.')
     url='https://streamhgapi.com/api/'+endpoint+'?'+urllib.parse.urlencode(dict(params or {},key=key))
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
     try:
-        with opener.open(urllib.request.Request(url,headers={'Accept':'application/json'}),timeout=30) as response:
+        with opener.open(urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'Mozilla/5.0'}),timeout=30) as response:
             raw=response.read(1024*1024+1)
-        if len(raw)>1024*1024:raise ValueError()
-        body=json.loads(raw)
-        if not isinstance(body,dict) or body.get('status')!=200:raise ValueError()
-        return body
+    except urllib.error.HTTPError as error:
+        raise HostError('StreamHG API discovery/info: HTTP '+_status(error.code)+'. Check API key, account access or host blocking. No file upload was started by this request.') from None
     except Exception:
-        raise ValueError('StreamHG API request failed. Check key, service availability and account permissions.') from None
+        raise HostError('StreamHG API discovery/info: connection or TLS failure. No file upload was started by this request.') from None
+    if len(raw)>1024*1024:raise HostError('StreamHG API discovery/info: oversized response; upload not started.')
+    try:body=json.loads(raw)
+    except (ValueError,TypeError):raise HostError('StreamHG API discovery/info: expected JSON but received another format, possibly a protection page. Upload not started.') from None
+    if not isinstance(body,dict) or _status(body.get('status'))!='200':
+        code=_status(body.get('status')) if isinstance(body,dict) else 'unknown'
+        raise HostError('StreamHG API discovery/info: rejected request (API status '+code+'). Check STREAMHG_API_KEY and account access.')
+    return body
 
 
 def upload_streamhg(path,name,key,mask=lambda _:None,run=subprocess.run,validate=None):
-    if any(c in name for c in ('\r','\n','\x00')):raise ValueError('Invalid output name')
+    if any(c in name for c in ('\r','\n','\x00')):raise HostError('StreamHG configuration: invalid output name.')
     mask(key)
+    print('Requesting StreamHG upload server',flush=True)
     server=streamhg_api('upload/server',key).get('result')
-    if not isinstance(server,str):raise ValueError('StreamHG returned an invalid upload server')
-    parsed=urllib.parse.urlsplit(server)
-    if (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password
-            or parsed.fragment or parsed.port not in (None,443) or not parsed.path.startswith('/upload/')):
-        raise ValueError('StreamHG upload server must be a public HTTPS upload endpoint')
-    if validate is None:
-        import socket,ipaddress
-        addresses=socket.getaddrinfo(parsed.hostname,443,type=socket.SOCK_STREAM)
-        if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
-            raise ValueError('StreamHG upload server must resolve to public addresses')
-    else:validate(server)
+    if not isinstance(server,str):raise HostError('StreamHG server discovery: upload URL missing in response; upload not started.')
+    try:
+        parsed=urllib.parse.urlsplit(server)
+        if (parsed.scheme!='https' or not parsed.hostname or parsed.username or parsed.password
+                or parsed.fragment or parsed.port not in (None,443) or not parsed.path.startswith('/upload/')):
+            raise ValueError()
+        if validate is None:
+            import socket,ipaddress
+            addresses=socket.getaddrinfo(parsed.hostname,443,type=socket.SOCK_STREAM)
+            if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):raise ValueError()
+        else:validate(server)
+    except Exception:
+        raise HostError('StreamHG server discovery: returned endpoint failed public HTTPS validation; upload not started.') from None
     mask(server)
+    print('StreamHG upload server validated; sending MP4',flush=True)
     quote=lambda v:v.replace('\\','\\\\').replace('"','\\"').replace('\r','').replace('\n','')
-    filename=quote(name)
-    local=quote(str(path))
+    filename=quote(name);local=quote(str(path))
     config='url = "'+quote(server)+'"\nform-string = "'+quote('key='+key)+'"\n'
     config+='form-string = "'+quote('file_title='+name.removesuffix('.mp4'))+'"\n'
     try:
         response=run(['curl','--config','-','--silent','--fail','--proto','=https',
-            '--connect-timeout','30','--max-time','3600','--form',
+            '--user-agent','Mozilla/5.0','--connect-timeout','30','--max-time','3600',
+            '--write-out','\nCLIXARENA_HTTP:%{http_code}','--form',
             'file=@"'+local+'";filename="'+filename+'"'],input=config,capture_output=True,text=True,timeout=3610)
-        if response.returncode:raise ValueError()
-        body=json.loads(response.stdout)
-        files=body.get('files') if isinstance(body,dict) else None
-        if (body.get('status')!=200 or not isinstance(files,list) or len(files)!=1
-                or not isinstance(files[0],dict) or files[0].get('status')!='OK'):
-            raise ValueError()
-        code=files[0].get('filecode')
-        if not isinstance(code,str) or not re.fullmatch('[A-Za-z0-9]{1,128}',code):raise ValueError()
-        return code
+    except subprocess.TimeoutExpired:
+        raise HostError('StreamHG file upload: timed out. Upload state is uncertain; check the account before retrying.') from None
     except Exception:
-        raise ValueError('StreamHG upload failed or response was ambiguous. Check the account before uploading again; no automatic retry.') from None
+        raise HostError('StreamHG file upload: uploader could not finish. Check curl installation and the account before retrying.') from None
+    raw,marker,http=response.stdout.rpartition('\nCLIXARENA_HTTP:')
+    if not marker:raw=response.stdout;http='unknown'
+    http=_status(http.strip())
+    if response.returncode:
+        hints={6:'DNS lookup failed',7:'could not connect to upload server',22:'HTTP request rejected',
+               28:'upload timed out',35:'TLS handshake failed',60:'TLS certificate verification failed',
+               26:'local output file could not be read',52:'upload server returned no response',56:'connection interrupted'}
+        hint=hints.get(response.returncode,'uploader failed')
+        raise HostError('StreamHG file upload: '+hint+' (curl '+str(int(response.returncode))+', HTTP '+http+'). Check the account before retrying; upload is not repeated automatically.')
+    try:body=json.loads(raw)
+    except (ValueError,TypeError):
+        raise HostError('StreamHG upload response: expected JSON (HTTP '+http+'). Upload may exist; check account before retrying.') from None
+    if not isinstance(body,dict) or _status(body.get('status'))!='200':
+        code=_status(body.get('status')) if isinstance(body,dict) else 'unknown'
+        raise HostError('StreamHG upload response: rejected or unsupported response (API status '+code+', HTTP '+http+'). Check account quota and upload permissions before retrying.')
+    files=body.get('files')
+    if not isinstance(files,list) or len(files)!=1 or not isinstance(files[0],dict):
+        raise HostError('StreamHG upload response: expected one file result. Upload may exist; check account before retrying.')
+    if str(files[0].get('status','')).upper()!='OK':
+        raise HostError('StreamHG upload response: file was not accepted. Check account quota, file limits and upload permissions before retrying.')
+    code=files[0].get('filecode')
+    if not isinstance(code,str) or not re.fullmatch('[A-Za-z0-9]{1,128}',code):
+        raise HostError('StreamHG upload response: accepted result has no valid filecode. Check account before retrying; no mapping was written.')
+    return code
 
 
 def verify_streamhg(file_id,key,size,name,attempts=6,pause=time.sleep):

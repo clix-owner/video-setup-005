@@ -24,7 +24,7 @@ from clixarena_features import (settings, subtitle_asset, audio_selection, fetch
                                 write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
 from clixarena_parallel import parallel_download
-from clixarena_hosts import selected_host,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss
+from clixarena_hosts import HostError,selected_host,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss
 
 def download_source(url,target,limit,root):
     descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
@@ -809,6 +809,7 @@ def complete_upload(path, output_name, values):
     if provider=='streamhg':
         print('Uploading video to StreamHG',flush=True)
         try:file_id=upload_streamhg(path,output_name,values['STREAMHG_API_KEY'],mask,validate=validate_url)
+        except HostError as error:raise DownloadError(str(error)) from None
         except Exception:raise DownloadError('StreamHG upload failed or response was not verified. Check StreamHG before uploading again; no automatic retry.') from None
         print('StreamHG upload accepted',flush=True)
         mapping_saved=True
