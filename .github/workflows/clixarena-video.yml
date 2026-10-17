@@ -30,7 +30,7 @@ on:
           - soft
           - transfer
       sample_only:
-        description: Encode first 3 minutes for preview (no Streamtape upload)
+        description: Encode first 3 minutes for preview (no host upload)
         required: true
         default: false
         type: boolean
@@ -149,6 +149,7 @@ jobs:
           OVERLAY_START: ${{ inputs.overlay_start }}
           OVERLAY_DURATION: ${{ inputs.overlay_duration }}
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
+          ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
         run: python3 scripts/clixarena_video.py
@@ -178,4 +179,4 @@ jobs:
           retention-days: 3
       - name: Failure guidance
         if: failure()
-        run: echo '::error::Check the stage message above. Verify video URL, repository SRT/font paths, UTF-8 SRT, selected language and font support, disk space and Streamtape secrets. Uploads are not retried automatically; check your Streamtape account before rerunning.'
+        run: echo '::error::Check the stage message above. Verify video URL, repository SRT/font paths, UTF-8 SRT, selected language and font support, disk space and the selected upload host secrets. Uploads are not retried automatically; check the selected host account before rerunning.'

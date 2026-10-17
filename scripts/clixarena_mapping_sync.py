@@ -15,14 +15,31 @@ def confirmed_missing(ids,check,pause=time.sleep):
     return first & missing_ids(first,check(sorted(first)))
 
 
+def streamtape_id(row):
+    providers=row.get('providers',{})
+    if isinstance(providers,dict) and isinstance(providers.get('streamtape'),dict):return providers['streamtape'].get('file_id')
+    return row.get('file_id')
+
+
 def prune(rows,missing):
-    return [row for row in rows if row.get('file_id') not in missing]
+    kept=[]
+    for row in rows:
+        if streamtape_id(row) not in missing:kept.append(row);continue
+        item=dict(row);item.pop('file_id',None)
+        providers=dict(item.get('providers',{}));providers.pop('streamtape',None)
+        if item.get('abyss_id') and 'abyss' not in providers:providers['abyss']={'file_id':item['abyss_id']}
+        if not providers:continue
+        item['providers']=providers
+        if item.get('provider')=='streamtape':item['provider']='abyss' if 'abyss' in providers else next(iter(providers))
+        kept.append(item)
+    return kept
 
 
 def main():
     try:
         repo=os.environ['GITHUB_REPOSITORY'];ref=os.environ['GITHUB_REF_NAME'];token=os.environ['MAPPING_GITHUB_TOKEN']
-        login=os.environ['STREAMTAPE_LOGIN'];key=os.environ['STREAMTAPE_KEY']
+        login=os.getenv('STREAMTAPE_LOGIN','');key=os.getenv('STREAMTAPE_KEY','')
+        if not login or not key:print('Streamtape mapping sync skipped: credentials are not configured.');return 0
         if not all((login,key,token)) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo):raise ValueError()
         for value in (token,login,key):mask(value)
         endpoint='https://api.github.com/repos/'+repo+'/contents/mappings.json'
@@ -39,7 +56,7 @@ def main():
                 if error.code==404:print('No mappings.json found; no changes.');return 0
                 raise
             rows=decrypt_mappings(json.loads(base64.b64decode(current['content'])))
-            ids=sorted({row['file_id'] for row in rows if isinstance(row.get('file_id'),str) and re.fullmatch('[A-Za-z0-9_-]{1,128}',row['file_id'])})
+            ids=sorted({streamtape_id(row) for row in rows if isinstance(streamtape_id(row),str) and re.fullmatch('[A-Za-z0-9_-]{1,128}',streamtape_id(row))})
             missing=set()
             for offset in range(0,len(ids),100):missing.update(confirmed_missing(ids[offset:offset+100],check))
             updated=prune(rows,missing)
@@ -50,7 +67,7 @@ def main():
             except urllib.error.HTTPError as error:
                 if error.code==409 and attempt<7:time.sleep(1);continue
                 raise
-            print('Mapping sync complete: removed '+str(len(rows)-len(updated))+' mapping(s). No video IDs or URLs logged.');return 0
+            print('Mapping sync complete: removed '+str(sum(streamtape_id(row) in missing for row in rows))+' unavailable Streamtape reference(s); other hosts preserved. No IDs or URLs logged.');return 0
         raise ValueError()
     except Exception:
         print('::error::Mapping sync could not complete. Unconfirmed files are preserved; check API availability, secrets and repository permissions. Raw responses suppressed.')

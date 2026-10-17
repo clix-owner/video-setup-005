@@ -23,6 +23,7 @@ import urllib.request
 from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
                                 write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
+from clixarena_hosts import selected_host,merge_provider_mapping,upload_abyss,verify_abyss
 
 def download_source(url,target,limit,root):
     descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
@@ -680,13 +681,8 @@ def external_subtitle_mapping(root=None):
     return {'subtitle_url': url, 'subtitle_language': asset['language'], 'subtitle_format': 'srt'}
 
 
-def merge_mapping(rows, identity, file_id):
-    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise ValueError('Invalid mappings file')
-    key = ('mal_id' if 'mal_id' in identity else 'anilist_id') if identity['type'] == 'anime' else 'tmdb_id'
-    item = dict(identity, file_id=file_id)
-    match = lambda row: all(row.get(k) == item[k] for k in ('type', key, 'season', 'episode'))
-    return [row for row in rows if not match(row)] + [item]
+def merge_mapping(rows, identity, file_id, provider='streamtape'):
+    return merge_provider_mapping(rows,identity,file_id,provider)
 
 
 def mapping_password():
@@ -724,7 +720,7 @@ def decrypt_mappings(document):
     return rows
 
 
-def save_mapping(file_id):
+def save_mapping(file_id,provider='streamtape'):
     identity = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}').get('mapping')
     if identity is None:
         return
@@ -740,7 +736,7 @@ def save_mapping(file_id):
         raise ValueError('Invalid mapping episode')
     identity = dict(identity, **external_subtitle_mapping())
     backup = Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'mapping-result.json'
-    backup.write_text(json.dumps(encrypt_mappings([dict(identity, file_id=file_id)]), indent=2) + '\n', encoding='utf-8')
+    backup.write_text(json.dumps(encrypt_mappings(merge_mapping([],identity,file_id,provider)), indent=2) + '\n', encoding='utf-8')
     repo = os.getenv('GITHUB_REPOSITORY', '')
     token = os.getenv('MAPPING_GITHUB_TOKEN', '')
     ref = os.getenv('GITHUB_REF_NAME', '')
@@ -762,7 +758,7 @@ def save_mapping(file_id):
                 if error.code != 404:
                     raise
                 current, rows = None, []
-            merged = merge_mapping(rows, identity, file_id)
+            merged = merge_mapping(rows, identity, file_id,provider)
             content = json.dumps(encrypt_mappings(merged), indent=2) + '\n'
             backup.write_text(content, encoding='utf-8')
             if rows == merged and current and not isinstance(document, list):
@@ -783,6 +779,26 @@ def save_mapping(file_id):
 
 
 def complete_upload(path, output_name, values):
+    provider=selected_host(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
+    if provider=='abyss':
+        print('Uploading video to Abyss',flush=True)
+        try:file_id=upload_abyss(path,output_name,values['ABYSS_API_KEY'],mask)
+        except Exception:raise DownloadError('Abyss upload failed or response was not verified. Check Abyss before uploading again; no automatic retry.') from None
+        print('Abyss upload accepted',flush=True)
+        mapping_saved=True
+        try:save_mapping(file_id,'abyss')
+        except Exception:
+            mapping_saved=False
+            print('::warning::Abyss upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)
+        verified,named=verify_abyss(file_id,values['ABYSS_API_KEY'],path.stat().st_size,output_name)
+        if not verified:print('::warning::Abyss upload accepted; metadata verification is pending. Check the Abyss manager before uploading again.',flush=True)
+        elif not named:print('::warning::Abyss upload verified, but the stored filename differs. Check the Abyss manager; do not upload again.',flush=True)
+        if not mapping_saved:raise DownloadError('Abyss upload accepted, but mapping save failed. Recover the encrypted mapping receipt and check repository access; do not upload the video again.')
+        print('Abyss upload complete. Playback processing may still be pending.',flush=True)
+        if os.getenv('GITHUB_OUTPUT'):
+            with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('upload_verified='+str(verified).lower()+'\nupload_host=abyss\n')
+        return
+
     print('Uploading video to Streamtape', flush=True)
     file_id = upload(path, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
     # Keep user names out of shell, FFmpeg paths and curl form syntax.
@@ -808,10 +824,10 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.15-video-timeline', flush=True)
+    print('CLIXARENA pipeline version 2026.10.17-upload-hosts', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
-                  ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')}
+                  ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','ABYSS_API_KEY')}
         sample_only = os.getenv('SAMPLE_ONLY', 'false').lower() == 'true'
         method = os.getenv('SUBTITLE_METHOD', 'burn')
         if method not in ('burn', 'soft', 'transfer'):
@@ -834,6 +850,9 @@ def main():
             required = tuple(name for name in required if name != 'FONT_PATH')
         if method == 'transfer':
             required = ('VIDEO_URL', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')
+        provider=selected_host(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
+        required=tuple(n for n in required if n not in ('STREAMTAPE_LOGIN','STREAMTAPE_KEY','ABYSS_API_KEY'))
+        if not sample_only:required+=('ABYSS_API_KEY',) if provider=='abyss' else ('STREAMTAPE_LOGIN','STREAMTAPE_KEY')
         missing = [name for name in required if not values[name].strip()]
         if missing:
             print('::error::Missing required configuration: ' + ', '.join(missing) +
@@ -1025,7 +1044,7 @@ def main():
                         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
                             file.write('### 3-minute sample ready\nDownload **CLIXARENA-sample** from this run artifacts. Inspect subtitles from 01:18 and watermark. No Streamtape upload performed.\n')
                     return 0
-                stage = 'Streamtape upload and filename update'
+                stage = 'selected host upload and metadata verification'
                 complete_upload(Path('clixarena.mp4'), output_name, values)
             finally:
                 os.chdir(original)
