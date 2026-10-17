@@ -23,6 +23,7 @@ import urllib.request
 from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
                                 write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
+from clixarena_parallel import parallel_download
 from clixarena_hosts import selected_host,merge_provider_mapping,upload_abyss,verify_abyss
 
 def download_source(url,target,limit,root):
@@ -183,6 +184,12 @@ def download(url, target, limit):
     source, drive_id = resolve_video_source(url)
     if drive_id:
         print('Google Drive file link detected; resolving download', flush=True)
+    connections=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('downloadConnections',4)
+    if type(connections) is not int or not 1<=connections<=16:
+        raise DownloadError('Choose 1 to 16 download connections.')
+    if not drive_id and parallel_download(source, target, limit,
+            lambda: urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect()), validate_url, connections=connections):
+        return
     for attempt in range(3):
         cookies = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect(), urllib.request.HTTPCookieProcessor(cookies)) if drive_id else OPENER
