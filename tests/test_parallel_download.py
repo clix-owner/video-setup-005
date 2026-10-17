@@ -45,6 +45,8 @@ class ParallelTests(unittest.TestCase):
                 attempt = attempts[(first,last)]
             if last-first+1 > 1 and (mode == 'always-full' or mode == 'transient-full' and attempt == 1):
                 return Response(data, 200, {'ETag':'"v1"'})
+            if mode == 'probe-transient' and headers['range']=='bytes=0-0' and attempt==1:
+                return Response(data,200,{})
             if mode == 'ignore':
                 return Response(data, 200, {})
             if mode == 'large':
@@ -79,7 +81,7 @@ class ParallelTests(unittest.TestCase):
     def test_unsupported_server_falls_back_without_body_download(self):
         self.assertFalse(self.run_download('ignore'))
         self.assertFalse(self.target.exists())
-        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.requests), 3)
 
     def test_missing_validator_and_size_limit_fall_back(self):
         for mode in ('no-validator', 'large'):
@@ -141,6 +143,17 @@ class ParallelTests(unittest.TestCase):
         for r in self.requests[1:]:
             first,last=map(int,r['range'][6:].split('-'))
             self.assertLessEqual(last-first+1,100000)
+
+    def test_transient_full_probe_recovers_before_parallel_download(self):
+        self.assertTrue(self.run_download('probe-transient', connections=6))
+        self.assertEqual(self.target.read_bytes(),self.data)
+        self.assertIn('Range probe returned full response; retrying probe',self.messages)
+        self.assertEqual(len(self.requests),8)
+
+    def test_early_fallback_reason_is_visible_without_url(self):
+        self.assertFalse(self.run_download('no-validator'))
+        self.assertIn('Parallel fallback reason: server did not provide a strong file validator',self.messages)
+        self.assertNotIn('secret',' '.join(self.messages))
 
     def test_explicit_disable(self):
         with patch.dict('os.environ', {'PARALLEL_DOWNLOAD': 'off'}):

@@ -187,9 +187,11 @@ def download(url, target, limit):
     connections=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('downloadConnections',4)
     if type(connections) is not int or not 1<=connections<=16:
         raise DownloadError('Choose 1 to 16 download connections.')
+    print('Download connections selected: '+str(connections),flush=True)
     if not drive_id and parallel_download(source, target, limit,
             lambda: urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect()), validate_url, connections=connections):
         return
+    print('Using single-connection media download',flush=True)
     for attempt in range(3):
         cookies = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect(), urllib.request.HTTPCookieProcessor(cookies)) if drive_id else OPENER
@@ -851,7 +853,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.17-upload-hosts', flush=True)
+    print('CLIXARENA pipeline version 2026.10.17-parallel-probe-v3', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}

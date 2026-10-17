@@ -13,6 +13,10 @@ RESERVE = 2 * 1024**3
 CHUNK_SIZE = 8 * 1024**2
 
 
+class ParallelCheckError(Exception):
+    """Only fixed local diagnostic messages, never remote data."""
+
+
 def parallel_download(url, target, limit, opener_factory, validate, log=print, connections=4):
     """Return False for single-stream fallback.
 
@@ -23,8 +27,10 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
     if type(connections) is not int or not 1 <= connections <= 16:
         raise ValueError('Choose 1 to 16 download connections')
     if connections == 1:
+        log('Single connection selected; parallel download disabled', flush=True)
         return False
     if os.getenv('PARALLEL_DOWNLOAD', 'true').lower() in ('0', 'false', 'off'):
+        log('Parallel download disabled by backend configuration', flush=True)
         return False
     started = False
     stop = threading.Event()
@@ -34,20 +40,29 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
         # This host fabricates validators per response. Restrict compatibility
         # handling to the tested host; other hosts retain strong ETag checks.
         compatibility = urllib.parse.urlsplit(url).hostname == 'trendimovies.com'
-        request = urllib.request.Request(url, headers=dict(headers, Range='bytes=0-0'))
-        with opener_factory().open(request, timeout=60) as response:
-            match = re.fullmatch(r'bytes 0-0/(\d+)', response.headers.get('Content-Range', ''))
-            etag = response.headers.get('ETag', '')
-            if (response.status != 206 or not match or (not compatibility and not re.fullmatch(r'"[^"\r\n]+"', etag))
-                    or response.headers.get('Content-Encoding', 'identity').lower() != 'identity'):
-                return False
-            total = int(match[1])
-            if total < MIN_SIZE or total > limit:
-                return False
-            if len(response.read(2)) != 1:
-                return False
+        log('Checking server byte-range support', flush=True)
+        for attempt in range(3):
+            request = urllib.request.Request(url, headers=dict(headers, Range='bytes=0-0'))
+            with opener_factory().open(request, timeout=30) as response:
+                if response.status != 206:
+                    if response.status == 200 and attempt < 2:
+                        log('Range probe returned full response; retrying probe', flush=True)
+                        continue
+                    raise ParallelCheckError('server did not return a partial response after range probing')
+                match = re.fullmatch(r'bytes 0-0/(\d+)', response.headers.get('Content-Range', ''))
+                etag = response.headers.get('ETag', '')
+                if not match:raise ParallelCheckError('server returned an invalid Content-Range')
+                if not compatibility and not re.fullmatch(r'"[^"\r\n]+"', etag):
+                    raise ParallelCheckError('server did not provide a strong file validator')
+                if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
+                    raise ParallelCheckError('server compressed the byte-range response')
+                total = int(match[1])
+                if total < MIN_SIZE:raise ParallelCheckError('file is smaller than the 16 MiB parallel threshold')
+                if total > limit:raise ParallelCheckError('declared file size exceeds the download limit')
+                if len(response.read(2)) != 1:raise ParallelCheckError('server returned an incorrect probe byte count')
+                break
         if shutil.disk_usage(target.parent).free < total + RESERVE:
-            return False
+            raise ParallelCheckError('insufficient disk space for parallel download and reserve')
         def sample(first):
             last = min(total - 1, first + 65535)
             req = urllib.request.Request(url, headers=dict(headers, Range=f'bytes={first}-{last}'))
@@ -131,8 +146,12 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
                         raise ValueError('Source content changed')
         log('Download complete; validating downloaded file', flush=True)
         return True
-    except Exception:
+    except Exception as error:
         if started:
             target.unlink(missing_ok=True)
             log('Parallel download unavailable; using a single connection', flush=True)
+        if isinstance(error, ParallelCheckError):
+            log('Parallel fallback reason: '+str(error), flush=True)
+        else:
+            log('Parallel fallback reason: range transfer or verification failed', flush=True)
         return False
