@@ -67,7 +67,7 @@ class ParallelTests(unittest.TestCase):
                 result.pop('ETag')
             return Response(body, 206, result)
         with patch.object(downloader, 'MIN_SIZE', 1), patch.object(downloader.shutil, 'disk_usage', return_value=SimpleNamespace(free=10**12)):
-            return downloader.parallel_download(('https://trendimovies.com/tgstream/stream/1' if compatibility else 'https://example.test/private?token=secret'), self.target, 12*1024**3,
+            return downloader._parallel_download_once(('https://trendimovies.com/tgstream/stream/1' if compatibility else 'https://example.test/private?token=secret'), self.target, 12*1024**3,
                 lambda: SimpleNamespace(open=open_request), lambda url: None,
                 log=lambda text, **kwargs: self.messages.append(text), connections=connections)
 
@@ -94,7 +94,7 @@ class ParallelTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertFalse(self.run_download(mode))
                 self.assertFalse(self.target.exists())
-                self.assertIn('Parallel download unavailable; using a single connection', self.messages)
+                self.assertIn('Parallel attempt failed; partial download discarded', self.messages)
 
     def test_compatibility_accepts_dynamic_validators(self):
         self.assertTrue(self.run_download('dynamic', compatibility=True))
@@ -160,6 +160,36 @@ class ParallelTests(unittest.TestCase):
             self.assertFalse(self.run_download())
         self.assertEqual(self.requests, [])
 
+
+class StepDownTests(unittest.TestCase):
+    def test_six_five_four_then_success_at_three(self):
+        attempts=[];logs=[]
+        def attempt(*args):
+            count=args[-1];attempts.append(count)
+            return True if count==3 else None
+        with patch.object(downloader,'_parallel_download_once',side_effect=attempt):
+            self.assertTrue(downloader.parallel_download('private',Path('unused'),100,None,None,log=lambda text,**kw:logs.append(text),connections=6))
+        self.assertEqual(attempts,[6,5,4,3])
+        self.assertNotIn('Parallel download unavailable; using a single connection',logs)
+
+    def test_single_stream_only_after_two_also_fails(self):
+        attempts=[];logs=[]
+        def attempt(*args):attempts.append(args[-1]);return None
+        with patch.object(downloader,'_parallel_download_once',side_effect=attempt):
+            self.assertFalse(downloader.parallel_download('private',Path('unused'),100,None,None,log=lambda text,**kw:logs.append(text),connections=6))
+        self.assertEqual(attempts,[6,5,4,3,2])
+        self.assertEqual(logs[-1],'Parallel download unavailable; using a single connection')
+
+    def test_unsupported_ranges_do_not_repeat_meaningless_attempts(self):
+        with patch.object(downloader,'_parallel_download_once',return_value=False) as once:
+            self.assertFalse(downloader.parallel_download('private',Path('unused'),100,None,None,connections=6))
+        once.assert_called_once()
+
+    def test_single_selected_and_disabled_do_not_step_down(self):
+        for count,disabled in [(1,'false'),(6,'off')]:
+            with patch.dict('os.environ',{'PARALLEL_DOWNLOAD':disabled}),patch.object(downloader,'_parallel_download_once',return_value=False) as once:
+                self.assertFalse(downloader.parallel_download('private',Path('unused'),100,None,None,connections=count))
+                once.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main()

@@ -18,6 +18,24 @@ class ParallelCheckError(Exception):
 
 
 def parallel_download(url, target, limit, opener_factory, validate, log=print, connections=4):
+    """Reduce failed parallel transfers one connection at a time before fallback."""
+    if type(connections) is not int or not 1 <= connections <= 16:
+        raise ValueError('Choose 1 to 16 download connections')
+    if connections == 1 or os.getenv('PARALLEL_DOWNLOAD','true').lower() in ('0','false','off'):
+        return _parallel_download_once(url,target,limit,opener_factory,validate,log,connections)
+    for count in range(connections,1,-1):
+        if count < connections:
+            log(f'Retrying parallel download with {count} connections',flush=True)
+        result=_parallel_download_once(url,target,limit,opener_factory,validate,log,count)
+        if result is True:return True
+        # Eligibility failures (no ranges/validator, small file, disk reserve)
+        # cannot be fixed by lowering concurrent transfers. Do not repeat them.
+        if result is False:return False
+    log('Parallel download unavailable; using a single connection',flush=True)
+    return False
+
+
+def _parallel_download_once(url, target, limit, opener_factory, validate, log=print, connections=4):
     """Return False for single-stream fallback.
 
     Each worker has its own redirect-validating opener. If-Range plus exact
@@ -149,9 +167,9 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
     except Exception as error:
         if started:
             target.unlink(missing_ok=True)
-            log('Parallel download unavailable; using a single connection', flush=True)
+            log('Parallel attempt failed; partial download discarded', flush=True)
         if isinstance(error, ParallelCheckError):
             log('Parallel fallback reason: '+str(error), flush=True)
         else:
             log('Parallel fallback reason: range transfer or verification failed', flush=True)
-        return False
+        return None if started else False
