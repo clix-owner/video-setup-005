@@ -1,4 +1,4 @@
-"""Conservative four-connection HTTPS download; never log URLs or exceptions."""
+"""Bounded parallel HTTPS range download; never log URLs or exceptions."""
 from concurrent.futures import ThreadPoolExecutor
 import os
 import re
@@ -6,9 +6,11 @@ import shutil
 import threading
 import urllib.request
 import urllib.parse
+import math
 
 MIN_SIZE = 16 * 1024**2
 RESERVE = 2 * 1024**3
+CHUNK_SIZE = 8 * 1024**2
 
 
 def parallel_download(url, target, limit, opener_factory, validate, log=print, connections=4):
@@ -67,13 +69,27 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
         with target.open('wb') as output:
             output.truncate(total)
 
-        def segment(index):
-            try:
-                first = total * index // connections
-                last = total * (index + 1) // connections - 1
-                conditional = {} if compatibility else {'If-Range': etag}
+        def open_range(first, last):
+            # Some proxies sporadically ignore a valid conditional Range.
+            # Retry only this range; unconditioned responses must still carry
+            # the same strong ETag before any bytes are accepted.
+            for attempt in range(3):
+                if stop.is_set():
+                    raise ValueError('Sibling connection stopped')
+                conditional = {} if compatibility or attempt else {'If-Range': etag}
                 req = urllib.request.Request(url, headers=dict(headers, Range=f'bytes={first}-{last}', **conditional))
-                with opener_factory().open(req, timeout=60) as response, target.open('r+b') as output:
+                response = opener_factory().open(req, timeout=60)
+                if response.status == 206:
+                    return response
+                response.close()
+                if stop.is_set():
+                    raise ValueError('Sibling connection stopped')
+            raise ValueError('Server repeatedly ignored byte ranges')
+
+        def segment(bounds):
+            try:
+                first, last = bounds
+                with open_range(first, last) as response, target.open('r+b') as output:
                     if (response.status != 206 or response.headers.get('Content-Range') != f'bytes {first}-{last}/{total}'
                             or (not compatibility and response.headers.get('ETag') != etag)
                             or response.headers.get('Content-Encoding', 'identity').lower() != 'identity'):
@@ -100,7 +116,9 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
                 raise
 
         with ThreadPoolExecutor(max_workers=connections) as pool:
-            futures = [pool.submit(segment, i) for i in range(connections)]
+            chunk = min(CHUNK_SIZE, math.ceil(total / connections))
+            ranges = [(first, min(total - 1, first + chunk - 1)) for first in range(0, total, chunk)]
+            futures = [pool.submit(segment, bounds) for bounds in ranges]
             for future in futures:
                 future.result()
         if target.stat().st_size != total:

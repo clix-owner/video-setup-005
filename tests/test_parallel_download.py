@@ -34,10 +34,17 @@ class ParallelTests(unittest.TestCase):
     def run_download(self, mode='ok', compatibility=False, connections=4):
         barrier = threading.Barrier(connections if type(connections) is int and 1<=connections<=16 else 4)
         data = self.data
+        attempts = {}
+        lock = threading.Lock()
         def open_request(request, timeout):
             headers = dict((k.lower(), v) for k, v in request.header_items())
             self.requests.append(headers)
             first, last = map(int, headers['range'][6:].split('-'))
+            with lock:
+                attempts[(first,last)] = attempts.get((first,last),0)+1
+                attempt = attempts[(first,last)]
+            if last-first+1 > 1 and (mode == 'always-full' or mode == 'transient-full' and attempt == 1):
+                return Response(data, 200, {'ETag':'"v1"'})
             if mode == 'ignore':
                 return Response(data, 200, {})
             if mode == 'large':
@@ -47,7 +54,7 @@ class ParallelTests(unittest.TestCase):
                 body = bytes([body[0] ^ 1]) + body[1:]
             etag = '"v1"'
             if last-first+1 > 65536:
-                barrier.wait(timeout=5)  # proves four simultaneous requests
+                if mode != 'small-chunks':barrier.wait(timeout=5)  # proves simultaneous requests
                 if mode == 'changed' or mode == 'dynamic':
                     etag = '"v2"'
                 if mode == 'short':
@@ -115,6 +122,25 @@ class ParallelTests(unittest.TestCase):
         for count in (0, 17, 2.5, True, '4'):
             with self.assertRaises(ValueError):
                 self.run_download(connections=count)
+
+    def test_selected_six_connections_recovers_ignored_range(self):
+        self.assertTrue(self.run_download('transient-full', connections=6))
+        self.assertEqual(self.target.read_bytes(), self.data)
+        self.assertTrue(any('if-range' not in r and r['range'] != 'bytes=0-0' for r in self.requests))
+        self.assertLessEqual(len(self.requests), 13)
+
+    def test_permanently_ignored_ranges_fall_back(self):
+        self.assertFalse(self.run_download('always-full', connections=6))
+        self.assertFalse(self.target.exists())
+        self.assertLessEqual(len(self.requests), 19)
+
+    def test_small_chunks_are_assembled_without_changing_bytes(self):
+        with patch.object(downloader, 'CHUNK_SIZE', 100000):
+            self.assertTrue(self.run_download('small-chunks', connections=6))
+        self.assertEqual(self.target.read_bytes(), self.data)
+        for r in self.requests[1:]:
+            first,last=map(int,r['range'][6:].split('-'))
+            self.assertLessEqual(last-first+1,100000)
 
     def test_explicit_disable(self):
         with patch.dict('os.environ', {'PARALLEL_DOWNLOAD': 'off'}):
