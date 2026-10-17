@@ -28,6 +28,7 @@ def prune(rows,missing):
         item=dict(row);item.pop('file_id',None)
         providers=dict(item.get('providers',{}));providers.pop('streamtape',None)
         if item.get('abyss_id') and 'abyss' not in providers:providers['abyss']={'file_id':item['abyss_id']}
+        if item.get('streamhg_id') and 'streamhg' not in providers:providers['streamhg']={'file_id':item['streamhg_id']}
         if not providers:continue
         item['providers']=providers
         if item.get('provider')=='streamtape':item['provider']='abyss' if 'abyss' in providers else next(iter(providers))

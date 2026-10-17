@@ -150,6 +150,7 @@ jobs:
           OVERLAY_DURATION: ${{ inputs.overlay_duration }}
           TMDB_READ_TOKEN: ${{ secrets.TMDB_READ_TOKEN }}
           ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
+          STREAMHG_API_KEY: ${{ secrets.STREAMHG_API_KEY }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
         run: python3 scripts/clixarena_video.py

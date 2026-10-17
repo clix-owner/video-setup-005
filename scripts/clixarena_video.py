@@ -24,7 +24,7 @@ from clixarena_features import (settings, subtitle_asset, audio_selection, fetch
                                 write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
 from clixarena_parallel import parallel_download
-from clixarena_hosts import selected_host,merge_provider_mapping,upload_abyss,verify_abyss
+from clixarena_hosts import selected_host,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss
 
 def download_source(url,target,limit,root):
     descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
@@ -806,6 +806,25 @@ def complete_upload(path, output_name, values):
             with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('upload_verified='+str(verified).lower()+'\nupload_host=abyss\n')
         return
 
+    if provider=='streamhg':
+        print('Uploading video to StreamHG',flush=True)
+        try:file_id=upload_streamhg(path,output_name,values['STREAMHG_API_KEY'],mask,validate=validate_url)
+        except Exception:raise DownloadError('StreamHG upload failed or response was not verified. Check StreamHG before uploading again; no automatic retry.') from None
+        print('StreamHG upload accepted',flush=True)
+        mapping_saved=True
+        try:save_mapping(file_id,'streamhg')
+        except Exception:
+            mapping_saved=False
+            print('::warning::StreamHG upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)
+        verified,named=verify_streamhg(file_id,values['STREAMHG_API_KEY'],path.stat().st_size,output_name)
+        if not verified:print('::warning::StreamHG upload accepted; metadata verification is pending. Check the StreamHG manager before uploading again.',flush=True)
+        elif not named:print('::warning::StreamHG upload verified, but the stored filename differs. Check the StreamHG manager; do not upload again.',flush=True)
+        if not mapping_saved:raise DownloadError('StreamHG upload accepted, but mapping save failed. Recover the encrypted mapping receipt and check repository access; do not upload the video again.')
+        print('StreamHG upload complete. Playback processing may still be pending.',flush=True)
+        if os.getenv('GITHUB_OUTPUT'):
+            with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('upload_verified='+str(verified).lower()+'\nupload_host=streamhg\n')
+        return
+
     print('Uploading video to Streamtape', flush=True)
     file_id = upload(path, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
     # Keep user names out of shell, FFmpeg paths and curl form syntax.
@@ -834,7 +853,7 @@ def main():
     print('CLIXARENA pipeline version 2026.10.17-upload-hosts', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
-                  ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','ABYSS_API_KEY')}
+                  ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
         sample_only = os.getenv('SAMPLE_ONLY', 'false').lower() == 'true'
         method = os.getenv('SUBTITLE_METHOD', 'burn')
         if method not in ('burn', 'soft', 'transfer'):
@@ -858,8 +877,8 @@ def main():
         if method == 'transfer':
             required = ('VIDEO_URL', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')
         provider=selected_host(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
-        required=tuple(n for n in required if n not in ('STREAMTAPE_LOGIN','STREAMTAPE_KEY','ABYSS_API_KEY'))
-        if not sample_only:required+=('ABYSS_API_KEY',) if provider=='abyss' else ('STREAMTAPE_LOGIN','STREAMTAPE_KEY')
+        required=tuple(n for n in required if n not in ('STREAMTAPE_LOGIN','STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY'))
+        if not sample_only:required+=('ABYSS_API_KEY',) if provider=='abyss' else ('STREAMHG_API_KEY',) if provider=='streamhg' else ('STREAMTAPE_LOGIN','STREAMTAPE_KEY')
         missing = [name for name in required if not values[name].strip()]
         if missing:
             print('::error::Missing required configuration: ' + ', '.join(missing) +
