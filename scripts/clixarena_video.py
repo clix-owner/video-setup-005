@@ -188,8 +188,24 @@ def download(url, target, limit):
     if type(connections) is not int or not 1<=connections<=16:
         raise DownloadError('Choose 1 to 16 download connections.')
     print('Download connections selected: '+str(connections),flush=True)
-    if not drive_id and parallel_download(source, target, limit,
-            lambda: urllib.request.build_opener(urllib.request.ProxyHandler({}), SafeRedirect()), validate_url, connections=connections):
+    parallel_source=source
+    cookies=http.cookiejar.CookieJar()
+    def parallel_opener():
+        # Each worker owns its opener and cookie jar; never share mutable jars.
+        import copy
+        local=http.cookiejar.CookieJar()
+        for cookie in cookies:local.set_cookie(copy.copy(cookie))
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}),SafeRedirect(),urllib.request.HTTPCookieProcessor(local))
+    if drive_id and connections>1 and os.getenv('PARALLEL_DOWNLOAD','true').lower() not in ('0','false','off'):
+        resolver=urllib.request.build_opener(urllib.request.ProxyHandler({}),SafeRedirect(),urllib.request.HTTPCookieProcessor(cookies))
+        request=urllib.request.Request(source,headers={'User-Agent':'Mozilla/5.0','Accept-Encoding':'identity','Range':'bytes=0-0'})
+        with open_video_response(resolver,request,drive_id) as response:
+            parallel_source=response.geturl()
+            if any(kind in response.headers.get('Content-Type','').lower() for kind in ('text/html','application/json')):
+                raise DownloadError('Google Drive returned a page instead of downloadable media.')
+            validate_url(parallel_source);mask(parallel_source)
+        print('Google Drive download resolved; checking parallel support',flush=True)
+    if parallel_download(parallel_source,target,limit,parallel_opener,validate_url,connections=connections):
         return
     print('Using single-connection media download',flush=True)
     for attempt in range(3):
@@ -872,7 +888,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.18-ordered-dual-upload', flush=True)
+    print('CLIXARENA pipeline version 2026.10.18-all-url-connections', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}

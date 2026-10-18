@@ -83,11 +83,16 @@ class ParallelTests(unittest.TestCase):
         self.assertFalse(self.target.exists())
         self.assertEqual(len(self.requests), 3)
 
-    def test_missing_validator_and_size_limit_fall_back(self):
-        for mode in ('no-validator', 'large'):
+    def test_size_limit_falls_back(self):
+        for mode in ('large',):
             with self.subTest(mode=mode):
                 self.assertFalse(self.run_download(mode))
                 self.assertFalse(self.target.exists())
+
+    def test_missing_validator_uses_sample_verified_parallel_download(self):
+        self.assertTrue(self.run_download('no-validator'))
+        self.assertEqual(self.target.read_bytes(),self.data)
+        self.assertTrue(all('if-range' not in r for r in self.requests))
 
     def test_changed_file_or_truncated_range_is_discarded(self):
         for mode in ('changed', 'short'):
@@ -151,8 +156,8 @@ class ParallelTests(unittest.TestCase):
         self.assertEqual(len(self.requests),8)
 
     def test_early_fallback_reason_is_visible_without_url(self):
-        self.assertFalse(self.run_download('no-validator'))
-        self.assertIn('Parallel fallback reason: server did not provide a strong file validator',self.messages)
+        self.assertFalse(self.run_download('ignore'))
+        self.assertIn('Parallel fallback reason: server did not return a partial response after range probing',self.messages)
         self.assertNotIn('secret',' '.join(self.messages))
 
     def test_explicit_disable(self):

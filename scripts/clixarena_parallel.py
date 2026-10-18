@@ -70,8 +70,10 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                 match = re.fullmatch(r'bytes 0-0/(\d+)', response.headers.get('Content-Range', ''))
                 etag = response.headers.get('ETag', '')
                 if not match:raise ParallelCheckError('server returned an invalid Content-Range')
-                if not compatibility and not re.fullmatch(r'"[^"\r\n]+"', etag):
-                    raise ParallelCheckError('server did not provide a strong file validator')
+                # Some download services (including Drive) omit ETags. Use
+                # bounded before/after samples rather than disable ranges.
+                if not re.fullmatch(r'"[^"\r\n]+"', etag):
+                    compatibility = True
                 if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
                     raise ParallelCheckError('server compressed the byte-range response')
                 total = int(match[1])
