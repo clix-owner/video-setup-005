@@ -205,7 +205,8 @@ def download(url, target, limit):
                 raise DownloadError('Google Drive returned a page instead of downloadable media.')
             validate_url(parallel_source);mask(parallel_source)
         print('Google Drive download resolved; checking parallel support',flush=True)
-    if parallel_download(parallel_source,target,limit,parallel_opener,validate_url,connections=connections):
+    if parallel_download(parallel_source,target,limit,parallel_opener,validate_url,connections=connections,
+            consume_full=lambda response:consume_video_response(response,target,limit)):
         return
     print('Using single-connection media download',flush=True)
     for attempt in range(3):
@@ -225,33 +226,38 @@ def download(url, target, limit):
             raise
 
 
+def consume_video_response(response,target,limit):
+    with target.open('wb') as output:
+        content_type = response.headers.get('Content-Type', '').lower()
+        if 'text/html' in content_type or 'application/json' in content_type:
+            raise DownloadError('The server returned a webpage or API response instead of video. Obtain a fresh direct download link.')
+        total = 0
+        declared_size = response.headers.get('Content-Length', '')
+        if declared_size.isdigit() and int(declared_size) > limit:
+            raise DownloadError('Video exceeds the 12 GB download limit.')
+        while block := response.read(1024 * 1024):
+            if total == 0 and block.lstrip()[:32].lower().startswith((b'<!doctype html', b'<html')):
+                raise DownloadError('The server returned an HTML page instead of video. Obtain a fresh direct download link.')
+            total += len(block)
+            if total > limit:
+                raise DownloadError('Video exceeds the 12 GB download limit.')
+            if shutil.disk_usage(target.parent).free < 2 * 1024**3:
+                raise DownloadError('Runner disk space is below the 2 GB reserve.')
+            output.write(block)
+        if declared_size.isdigit() and total != int(declared_size):
+            raise RetryableDownloadError('Download is incomplete after three attempts: received size differs from the server Content-Length. The host may be truncating the file or reporting an incorrect size.')
+    if not target.stat().st_size:
+        raise DownloadError('The server returned an empty file.')
+    print('Download complete; validating downloaded file', flush=True)
+
+
 def _download_once(url, target, limit, opener=OPENER, drive_id=None):
     validate_url(url)
     mask(url)
     request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Accept-Encoding': 'identity'})
     try:
-        with open_video_response(opener, request, drive_id) as response, target.open('wb') as output:
-            content_type = response.headers.get('Content-Type', '').lower()
-            if 'text/html' in content_type or 'application/json' in content_type:
-                raise DownloadError('The server returned a webpage or API response instead of video. Obtain a fresh direct download link.')
-            total = 0
-            declared_size = response.headers.get('Content-Length', '')
-            if declared_size.isdigit() and int(declared_size) > limit:
-                raise DownloadError('Video exceeds the 12 GB download limit.')
-            while block := response.read(1024 * 1024):
-                if total == 0 and block.lstrip()[:32].lower().startswith((b'<!doctype html', b'<html')):
-                    raise DownloadError('The server returned an HTML page instead of video. Obtain a fresh direct download link.')
-                total += len(block)
-                if total > limit:
-                    raise DownloadError('Video exceeds the 12 GB download limit.')
-                if shutil.disk_usage(target.parent).free < 2 * 1024**3:
-                    raise DownloadError('Runner disk space is below the 2 GB reserve.')
-                output.write(block)
-            if declared_size.isdigit() and total != int(declared_size):
-                raise RetryableDownloadError('Download is incomplete after three attempts: received size differs from the server Content-Length. The host may be truncating the file or reporting an incorrect size.')
-        if not target.stat().st_size:
-            raise DownloadError('The server returned an empty file.')
-        print('Download complete; validating downloaded file', flush=True)
+        with open_video_response(opener, request, drive_id) as response:
+            consume_video_response(response,target,limit)
     except urllib.error.HTTPError as error:
         hints = {401: 'Link requires authentication.', 403: 'Link expired, needs cookies, or the host blocked this runner.',
                  404: 'File was not found or the link expired.', 429: 'Host rate limit reached.'}
@@ -888,7 +894,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.18-range-recovery', flush=True)
+    print('CLIXARENA pipeline version 2026.10.18-reuse-full-response', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}

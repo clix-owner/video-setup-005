@@ -20,16 +20,17 @@ class ParallelCheckError(Exception):
     """Only fixed local diagnostic messages, never remote data."""
 
 
-def parallel_download(url, target, limit, opener_factory, validate, log=print, connections=4):
+def parallel_download(url, target, limit, opener_factory, validate, log=print, connections=4, consume_full=None):
     """Reduce failed parallel transfers one connection at a time before fallback."""
     if type(connections) is not int or not 1 <= connections <= 16:
         raise ValueError('Choose 1 to 16 download connections')
     if connections == 1 or os.getenv('PARALLEL_DOWNLOAD','true').lower() in ('0','false','off'):
         return _parallel_download_once(url,target,limit,opener_factory,validate,log,connections)
+    extra={"consume_full":consume_full} if consume_full is not None else {}
     for count in range(connections,1,-1):
         if count < connections:
             log(f'Retrying parallel download with {count} connections',flush=True)
-        result=_parallel_download_once(url,target,limit,opener_factory,validate,log,count)
+        result=_parallel_download_once(url,target,limit,opener_factory,validate,log,count,**extra)
         if result is True:return True
         # Eligibility failures (no ranges/validator, small file, disk reserve)
         # cannot be fixed by lowering concurrent transfers. Do not repeat them.
@@ -38,7 +39,7 @@ def parallel_download(url, target, limit, opener_factory, validate, log=print, c
     return False
 
 
-def _parallel_download_once(url, target, limit, opener_factory, validate, log=print, connections=4):
+def _parallel_download_once(url, target, limit, opener_factory, validate, log=print, connections=4, consume_full=None):
     """Return False for single-stream fallback.
 
     Each worker has its own redirect-validating opener. If-Range plus exact
@@ -53,6 +54,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
     if os.getenv('PARALLEL_DOWNLOAD', 'true').lower() in ('0', 'false', 'off'):
         log('Parallel download disabled by backend configuration', flush=True)
         return False
+    consuming_full = False
     started = False
     stop = threading.Event()
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Accept-Encoding': 'identity'}
@@ -66,11 +68,31 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
             request = urllib.request.Request(url, headers=dict(headers, Range='bytes=0-0'))
             try:
                 probe_response=opener_factory().open(request,timeout=60)
+            except urllib.error.HTTPError as error:
+                if error.code in (400,401) and consume_full is not None:
+                    error.close()
+                    # Some signed media endpoints reject Range itself. Try a
+                    # normal GET once; do not manufacture credentials or URLs.
+                    plain=urllib.request.Request(url,headers=headers)
+                    with opener_factory().open(plain,timeout=60) as response:
+                        if response.status!=200:raise ParallelCheckError('server did not return a partial response after range probing')
+                        log('Server ignored ranges; downloading from the same open connection',flush=True)
+                        consuming_full=True
+                        consume_full(response)
+                        return True
+                if error.code not in (408,429,500,502,503,504) or attempt==2:raise
+                error.close();time.sleep(attempt+1)
+                continue
             except (urllib.error.URLError,TimeoutError,ConnectionError,http.client.IncompleteRead):
                 if attempt==2:raise
                 time.sleep(attempt+1)
                 continue
             with probe_response as response:
+                if response.status == 200 and consume_full is not None:
+                    log('Server ignored ranges; downloading from the same open connection',flush=True)
+                    consuming_full=True
+                    consume_full(response)
+                    return True
                 if response.status != 206:
                     if response.status == 200 and attempt < 2:
                         log('Range probe returned full response; retrying probe', flush=True)
@@ -195,6 +217,9 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
         log('Download complete; validating downloaded file', flush=True)
         return True
     except Exception as error:
+        if consuming_full:
+            target.unlink(missing_ok=True)
+            raise
         if started:
             target.unlink(missing_ok=True)
             log('Parallel attempt failed; partial download discarded', flush=True)
