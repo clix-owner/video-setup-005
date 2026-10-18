@@ -888,7 +888,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.18-all-url-connections', flush=True)
+    print('CLIXARENA pipeline version 2026.10.18-range-recovery', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}

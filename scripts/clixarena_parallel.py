@@ -7,10 +7,13 @@ import threading
 import urllib.request
 import urllib.parse
 import math
+import time
+import http.client
+import urllib.error
 
 MIN_SIZE = 16 * 1024**2
 RESERVE = 2 * 1024**3
-CHUNK_SIZE = 8 * 1024**2
+CHUNK_SIZE = 2 * 1024**2
 
 
 class ParallelCheckError(Exception):
@@ -61,7 +64,13 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
         log('Checking server byte-range support', flush=True)
         for attempt in range(3):
             request = urllib.request.Request(url, headers=dict(headers, Range='bytes=0-0'))
-            with opener_factory().open(request, timeout=30) as response:
+            try:
+                probe_response=opener_factory().open(request,timeout=60)
+            except (urllib.error.URLError,TimeoutError,ConnectionError,http.client.IncompleteRead):
+                if attempt==2:raise
+                time.sleep(attempt+1)
+                continue
+            with probe_response as response:
                 if response.status != 206:
                     if response.status == 200 and attempt < 2:
                         log('Range probe returned full response; retrying probe', flush=True)
@@ -83,7 +92,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                 break
         if shutil.disk_usage(target.parent).free < total + RESERVE:
             raise ParallelCheckError('insufficient disk space for parallel download and reserve')
-        def sample(first):
+        def sample_once(first):
             last = min(total - 1, first + 65535)
             req = urllib.request.Request(url, headers=dict(headers, Range=f'bytes={first}-{last}'))
             with opener_factory().open(req, timeout=60) as response:
@@ -94,6 +103,12 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                 if len(body) != last - first + 1:
                     raise ValueError('Sample length mismatch')
                 return body
+        def sample(first):
+            for attempt in range(3):
+                try:return sample_once(first)
+                except (urllib.error.URLError,TimeoutError,ConnectionError,http.client.IncompleteRead):
+                    if attempt==2:raise
+                    time.sleep(attempt+1)
         samples = {}
         if compatibility:
             for first in sorted({0, total - min(total, 65536)} | {total*i//connections for i in range(1,connections)}):
@@ -121,7 +136,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                     raise ValueError('Sibling connection stopped')
             raise ValueError('Server repeatedly ignored byte ranges')
 
-        def segment(bounds):
+        def segment_once(bounds):
             try:
                 first, last = bounds
                 with open_range(first, last) as response, target.open('r+b') as output:
@@ -139,7 +154,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                             raise ValueError('Sibling connection stopped')
                         block = response.read(min(1024**2, remaining))
                         if not block:
-                            raise ValueError('Truncated range')
+                            raise ConnectionError('Truncated range')
                         if shutil.disk_usage(target.parent).free < RESERVE:
                             raise ValueError('Disk reserve reached')
                         output.write(block)
@@ -147,8 +162,21 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                     if response.read(1):
                         raise ValueError('Oversized range')
             except Exception:
-                stop.set()
                 raise
+
+        def segment(bounds):
+            # A failed read restarts ONLY this bounded range. Other completed
+            # ranges remain in place, with no second video download/encode.
+            for attempt in range(5):
+                if stop.is_set():raise ValueError('Sibling connection stopped')
+                try:return segment_once(bounds)
+                except Exception as error:
+                    transient=isinstance(error,(urllib.error.URLError,TimeoutError,ConnectionError,http.client.IncompleteRead))
+                    if isinstance(error,urllib.error.HTTPError):transient=error.code in (408,429,500,502,503,504)
+                    if not transient or attempt==4:
+                        stop.set();raise
+                    log('Retrying interrupted video range; completed ranges retained',flush=True)
+                    time.sleep(min(4,attempt+1))
 
         with ThreadPoolExecutor(max_workers=connections) as pool:
             chunk = min(CHUNK_SIZE, math.ceil(total / connections))
@@ -174,4 +202,6 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
             log('Parallel fallback reason: '+str(error), flush=True)
         else:
             log('Parallel fallback reason: range transfer or verification failed', flush=True)
-        return None if started else False
+        transient=isinstance(error,(urllib.error.URLError,TimeoutError,ConnectionError,http.client.IncompleteRead))
+        if isinstance(error,urllib.error.HTTPError):transient=error.code in (408,429,500,502,503,504)
+        return None if started or transient else False
