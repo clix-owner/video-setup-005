@@ -28,9 +28,7 @@ def timestamp(value):
 
 def settings():
     quality = os.getenv('QUALITY', '720p - Balanced')
-    choices = {'Original - High': (None, 18), '1080p - High': (1080, 18),
-               '720p - High': (720, 18), 'Original - Balanced': (None, 23),
-               '1080p - Balanced': (1080, 23), '720p - Balanced': (720, 23)}
+    choices = {f'{label} - {tier}': (height, crf) for label,height in [('Original',None)]+[(str(h)+'p',h) for h in (360,480,720,1080,1440,2160)] for tier,crf in [('High',18),('Balanced',23)]}
     if quality not in choices:
         raise ValueError('Unsupported quality choice')
     height, crf = choices[quality]
@@ -215,8 +213,16 @@ def video_dimensions(stream, height):
         width = round(width * a / b)
     if rotation % 180:
         width, source_height = source_height, width
-    factor = min(1, height / source_height) if height else 1
-    return max(2, int(width * factor) // 2 * 2), max(2, int(source_height * factor) // 2 * 2)
+    if height is not None:
+        canvas={360:(640,360),480:(854,480),720:(1280,720),1080:(1920,1080),1440:(2560,1440),2160:(3840,2160)}
+        if height not in canvas:raise ValueError('Unsupported standard resolution')
+        return canvas[height]
+    return max(2,width//2*2),max(2,source_height//2*2)
+
+def fitted_dimensions(stream,width,height):
+    source_width,source_height=video_dimensions(stream,None)
+    factor=min(width/source_width,height/source_height)
+    return max(2,int(source_width*factor)//2*2),max(2,int(source_height*factor)//2*2)
 
 
 def logo_dimensions(width, height, logo_size, scale=100):
@@ -228,7 +234,10 @@ def logo_dimensions(width, height, logo_size, scale=100):
 
 
 def filter_graph(width, height, options, logo_size=None):
-    base = f'[0:v:0]scale={width}:{height}:flags=lanczos,setsar=1,'
+    content_width,content_height=options.get('content_size',(width,height))
+    base = f'[0:v:0]scale={content_width}:{content_height}:flags=lanczos,setsar=1,'
+    if (content_width,content_height)!=(width,height):
+        base += f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,'
     if options.get('subtitle_enabled', True):
         base += 'ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
     base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'

@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 from clixarena_features import (settings, subtitle_asset, audio_selection, fetch_logo,
-                                write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
+                                write_intro, video_dimensions, fitted_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
 from clixarena_parallel import parallel_download
 from clixarena_hosts import HostError,selected_host,selected_hosts,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss
@@ -894,7 +894,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.18-reuse-full-response', flush=True)
+    print('CLIXARENA pipeline version 2026.10.18-standard-resolutions', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
@@ -1058,6 +1058,7 @@ def main():
                 audio_map = portal_audio_selection(source['streams'], options['audio'])
                 video_stream = next(s for s in source['streams'] if s['codec_type'] == 'video')
                 width, height = video_dimensions(video_stream, options['height'])
+                options['content_size']=fitted_dimensions(video_stream,width,height)
                 print(f'Output {width} x {height}, H.264 CRF {options["crf"]}, preset {options["preset"]}', flush=True)
                 if any(options['parts'].values()) and options['start'] >= expected_duration:
                     print('::warning::Title timestamp is outside this encode. It will not appear; choose a timestamp within the sample/full video duration.')
@@ -1095,6 +1096,10 @@ def main():
                 stage = 'output MP4 validation'
                 output = probe('clixarena.mp4')
                 streams = output['streams']
+                if method=='burn':
+                    encoded_video=next((s for s in streams if s.get('codec_type')=='video'),{})
+                    if (encoded_video.get('width'),encoded_video.get('height'))!=(width,height):
+                        raise DownloadError('Output frame dimensions differ from the selected resolution. Upload was not started.')
                 if not any(s.get('codec_name') == 'h264' for s in streams) or any(s.get('codec_type') == 'audio' and s.get('codec_name') != 'aac' for s in streams):
                     raise DownloadError('Output validation failed: expected H.264 video and AAC audio. Upload was not started.')
                 if abs(expected_duration - float(output['format']['duration'])) > 2:

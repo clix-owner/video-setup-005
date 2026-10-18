@@ -50,6 +50,14 @@ on:
         default: 720p - Balanced
         type: choice
         options:
+          - 360p - High
+          - 360p - Balanced
+          - 480p - High
+          - 480p - Balanced
+          - 1440p - High
+          - 1440p - Balanced
+          - 2160p - High
+          - 2160p - Balanced
           - Original - High
           - 1080p - High
           - 720p - High
