@@ -8,6 +8,16 @@ def selected_host(layout):
     return value
 
 
+def selected_hosts(layout):
+    first=selected_host(layout)
+    second=layout.get('secondUploadHost','')
+    if second not in ('','streamtape','streamhg','abyss'):
+        raise ValueError('Choose a valid second upload host')
+    if second==first:
+        raise ValueError('Choose two different upload hosts')
+    return [first,second] if second else [first]
+
+
 def merge_provider_mapping(rows,identity,file_id,provider='streamtape'):
     if provider not in ('streamtape','streamhg','abyss') or not isinstance(file_id,str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}',file_id):raise ValueError('Invalid host or video ID')
     if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):raise ValueError('Invalid mappings')

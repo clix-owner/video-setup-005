@@ -24,7 +24,7 @@ from clixarena_features import (settings, subtitle_asset, audio_selection, fetch
                                 write_intro, video_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
 from clixarena_parallel import parallel_download
-from clixarena_hosts import HostError,selected_host,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss
+from clixarena_hosts import HostError,selected_host,selected_hosts,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss
 
 def download_source(url,target,limit,root):
     descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
@@ -745,7 +745,8 @@ def save_mapping(file_id,provider='streamtape'):
         raise ValueError('Invalid mapping episode')
     identity = dict(identity, **external_subtitle_mapping())
     backup = Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'mapping-result.json'
-    backup.write_text(json.dumps(encrypt_mappings(merge_mapping([],identity,file_id,provider)), indent=2) + '\n', encoding='utf-8')
+    receipt_rows=decrypt_mappings(json.loads(backup.read_text(encoding='utf-8'))) if backup.is_file() else []
+    backup.write_text(json.dumps(encrypt_mappings(merge_mapping(receipt_rows,identity,file_id,provider)), indent=2) + '\n', encoding='utf-8')
     repo = os.getenv('GITHUB_REPOSITORY', '')
     token = os.getenv('MAPPING_GITHUB_TOKEN', '')
     ref = os.getenv('GITHUB_REF_NAME', '')
@@ -788,7 +789,25 @@ def save_mapping(file_id,provider='streamtape'):
 
 
 def complete_upload(path, output_name, values):
-    provider=selected_host(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
+    providers=selected_hosts(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
+    if len(providers)==1:
+        return complete_upload_one(path,output_name,values,providers[0])
+    failures=[]
+    for index,provider in enumerate(providers,1):
+        print('Upload destination '+str(index)+' of '+str(len(providers))+': '+provider,flush=True)
+        try:
+            complete_upload_one(path,output_name,values,provider)
+        except Exception as error:
+            failures.append(provider)
+            # Only our deliberately safe errors may reach the log.
+            if isinstance(error,DownloadError):print('::warning::'+str(error),flush=True)
+            print('::warning::'+provider+' upload or finalization could not be confirmed. Check that host before retrying; no automatic upload retry.',flush=True)
+    if failures:
+        raise DownloadError('Upload incomplete for: '+', '.join(failures)+'. Other accepted uploads and mapping receipts are preserved. Do not rerun the whole job blindly.')
+    print('All selected upload destinations completed.',flush=True)
+
+
+def complete_upload_one(path, output_name, values, provider):
     if provider=='abyss':
         print('Uploading video to Abyss',flush=True)
         try:file_id=upload_abyss(path,output_name,values['ABYSS_API_KEY'],mask)
@@ -830,6 +849,10 @@ def complete_upload(path, output_name, values):
 
     print('Uploading video to Streamtape', flush=True)
     file_id = upload(path, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
+    try:
+        save_mapping(file_id)
+    except Exception:
+        raise DownloadError('Streamtape upload accepted, but mapping save failed. Recover the encrypted mapping receipt; do not upload again.') from None
     # Keep user names out of shell, FFmpeg paths and curl form syntax.
     renamed = api('file/rename', {'login': values['STREAMTAPE_LOGIN'],
                   'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
@@ -838,10 +861,6 @@ def complete_upload(path, output_name, values):
     filename_verified = verify_filename(file_id, output_name, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
     if not filename_verified:
         print('::warning::Upload verified and rename accepted, but the final filename could not be confirmed. Check the filename in Streamtape file manager; do not rerun just for this warning.')
-    try:
-        save_mapping(file_id)
-    except Exception:
-        print('::warning::Video uploaded, but mappings.json could not be saved. Download the CLIXARENA-mapping artifact and merge it into mappings.json; do not upload the video again.')
     # Do not construct, print, summarize or export a Streamtape video URL/ID.
     print('Upload verified. Find the video in your Streamtape file manager.', flush=True)
     if os.getenv('GITHUB_OUTPUT'):
@@ -853,7 +872,7 @@ def complete_upload(path, output_name, values):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.17-parallel-stepdown-v4', flush=True)
+    print('CLIXARENA pipeline version 2026.10.18-ordered-dual-upload', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
@@ -879,9 +898,11 @@ def main():
             required = tuple(name for name in required if name != 'FONT_PATH')
         if method == 'transfer':
             required = ('VIDEO_URL', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY')
-        provider=selected_host(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
+        providers=selected_hosts(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
         required=tuple(n for n in required if n not in ('STREAMTAPE_LOGIN','STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY'))
-        if not sample_only:required+=('ABYSS_API_KEY',) if provider=='abyss' else ('STREAMHG_API_KEY',) if provider=='streamhg' else ('STREAMTAPE_LOGIN','STREAMTAPE_KEY')
+        if not sample_only:
+            for provider in providers:
+                required+=('ABYSS_API_KEY',) if provider=='abyss' else ('STREAMHG_API_KEY',) if provider=='streamhg' else ('STREAMTAPE_LOGIN','STREAMTAPE_KEY')
         missing = [name for name in required if not values[name].strip()]
         if missing:
             print('::error::Missing required configuration: ' + ', '.join(missing) +
