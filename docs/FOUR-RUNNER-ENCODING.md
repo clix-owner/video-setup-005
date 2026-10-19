@@ -1,6 +1,6 @@
 # GitHub-only production parallel encoding
 
-Release: 2026.10.19-github-only-parallel
+Release: 2026.10.19-audio-wait-10m
 
 The normal workflow now has three paths:
 

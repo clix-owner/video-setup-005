@@ -96,25 +96,32 @@ def subtitle_asset(root, value):
     return repository_file(root, str(files[0].relative_to(root)), '.srt', 10 * 1024**2)
 
 
-def audio_selection(streams, choice):
+def audio_selection(streams, choice, list_tracks=True):
     tracks = [s for s in streams if s.get('codec_type') == 'audio']
-    for i, track in enumerate(tracks):
+    def details(track):
         language = track.get('tags', {}).get('language', 'und')
-        if not re.fullmatch(r'[A-Za-z0-9_-]{1,20}', language):
-            language = 'und'
-        print(f'Audio track {i}: language={language}, channels={int(track.get("channels", 0))}')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,20}', language): language = 'und'
+        codec = track.get('codec_name', 'unknown')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', codec): codec = 'unknown'
+        return f'language={language}, codec={codec}, channels={int(track.get("channels", 0))}'
+    if list_tracks:
+        print(f'Audio tracks found: {len(tracks)}', flush=True)
+        for i,track in enumerate(tracks): print(f'Audio track {i}: {details(track)}', flush=True)
+    def selected(index):
+        print(f'Selected audio: track {index}; {details(tracks[index])}', flush=True)
+        return f'0:a:{index}'
     if choice == 'auto':
-        index = next((i for i, t in enumerate(tracks) if t.get('disposition', {}).get('default')), 0)
-        return f'0:a:{index}' if tracks else '0:a:0?'
-    if re.fullmatch(r'\d+', choice):
-        index = int(choice)
-        if index < len(tracks):
-            return f'0:a:{index}'
-    elif re.fullmatch(r'[a-z]{2,3}', choice):
-        index = next((i for i, t in enumerate(tracks) if t.get('tags', {}).get('language') == choice), None)
-        if index is not None:
-            return f'0:a:{index}'
-    print('::error::Requested audio track is unavailable. Use one of the zero-based track numbers listed above, its language code (e.g. eng), or auto.')
+        if not tracks:
+            print('No audio track found; continuing with video only', flush=True)
+            return '0:a:0?'
+        return selected(next((i for i,t in enumerate(tracks) if t.get('disposition',{}).get('default')),0))
+    if re.fullmatch(r'\d+',choice):
+        index=int(choice)
+        if index<len(tracks):return selected(index)
+    elif re.fullmatch(r'[a-z]{2,3}',choice):
+        index=next((i for i,t in enumerate(tracks) if t.get('tags',{}).get('language')==choice),None)
+        if index is not None:return selected(index)
+    print('::error::Requested audio track is unavailable. Use one of the zero-based track numbers listed above, its language code (e.g. eng), or auto.',flush=True)
     raise ValueError('Audio selection unavailable')
 
 

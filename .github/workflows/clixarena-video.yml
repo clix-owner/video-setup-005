@@ -123,6 +123,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   encode:
+    name: Download, audio selection and preparation
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     outputs:
@@ -165,7 +166,7 @@ jobs:
           STREAMHG_API_KEY: ${{ secrets.STREAMHG_API_KEY }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
-        run: python3 scripts/clixarena_video.py
+        run: python3 -u scripts/clixarena_video.py
       - name: Stage source chunk 1
         if: ${{ steps.video.outputs.distributed == 'true' && contains(fromJSON(steps.video.outputs.matrix), 0) }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -293,7 +294,7 @@ jobs:
           name: parallel-assets
           path: parallel-media/assets
       - name: Encode and validate this chunk
-        run: python3 scripts/clixarena_distributed.py worker --index '${{ matrix.chunk }}'
+        run: python3 -u scripts/clixarena_distributed.py worker --index '${{ matrix.chunk }}'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: parallel-encoded-${{ matrix.chunk }}
@@ -340,7 +341,7 @@ jobs:
           STREAMHG_API_KEY: ${{ secrets.STREAMHG_API_KEY }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
-        run: python3 scripts/clixarena_distributed.py merge
+        run: python3 -u scripts/clixarena_distributed.py merge
       - name: Mapping receipt
         if: ${{ always() && !inputs.sample_only }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

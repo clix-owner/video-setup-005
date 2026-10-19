@@ -608,6 +608,8 @@ def transfer_mp4_args(streams, crf=23, preset='veryfast'):
     return args + ['-movflags', '+faststart']
 
 
+_AUDIO_STATE_CACHE = {}
+
 def audio_job_request(job_id, payload=None, sha=None, state_dir='audio'):
     repo = os.getenv('GITHUB_REPOSITORY', '')
     token = os.getenv('MAPPING_GITHUB_TOKEN', '')
@@ -617,6 +619,10 @@ def audio_job_request(job_id, payload=None, sha=None, state_dir='audio'):
     if state_dir not in ('audio','torrent','download'):raise ValueError('Invalid selection state folder')
     endpoint = 'https://api.github.com/repos/' + repo + '/contents/.clixarena/' + state_dir + '/' + job_id + '.json'
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}
+    cache_key = (endpoint, ref, hashlib.sha256(token.encode()).digest())
+    cached = _AUDIO_STATE_CACHE.get(cache_key) if payload is None and state_dir == 'audio' else None
+    if cached:
+        headers['If-None-Match'] = cached[0]
     if payload is None:
         request = urllib.request.Request(endpoint + '?ref=' + urllib.parse.quote(ref, safe=''), headers=headers)
     else:
@@ -628,8 +634,15 @@ def audio_job_request(job_id, payload=None, sha=None, state_dir='audio'):
     for attempt in range(12):
         try:
             with opener.open(request, timeout=30) as response:
-                return json.loads(response.read(1024 * 1024))
+                document = json.loads(response.read(1024 * 1024))
+                etag = getattr(response, 'headers', {}).get('ETag')
+                if payload is None and state_dir == 'audio' and etag:
+                    _AUDIO_STATE_CACHE[cache_key] = (etag, document)
+                return document
         except urllib.error.HTTPError as error:
+            if error.code == 304 and cached:
+                error.close()
+                return cached[1]
             if payload is None or error.code != 409 or attempt == 11:
                 raise
             time.sleep(random.uniform(0.15, 1.0) * min(3, 1 + attempt // 4))
@@ -638,7 +651,7 @@ def audio_job_request(job_id, payload=None, sha=None, state_dir='audio'):
             request = urllib.request.Request(endpoint, data=json.dumps(body).encode(), headers=headers, method='PUT')
 
 
-def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monotonic, wait_seconds=1200):
+def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monotonic, wait_seconds=600):
     tracks = [s for s in streams if s.get('codec_type') == 'audio']
     if choice != 'ask' or len(tracks) <= 1:
         return audio_selection(streams, 'auto' if choice == 'ask' else choice)
@@ -652,21 +665,27 @@ def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monoton
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', codec):
             codec = 'unknown'
         state['tracks'].append({'index': index, 'language': language, 'channels': int(track.get('channels', 0)), 'codec': codec})
+    print(f'Audio tracks found: {len(tracks)}', flush=True)
+    for track in state['tracks']:
+        print(f'Audio track {track["index"]}: language={track["language"]}, codec={track["codec"]}, channels={track["channels"]}', flush=True)
     try:
         current = audio_job_request(job_id)
     except urllib.error.HTTPError as error:
         if error.code != 404:
             raise
         current = None
-    audio_job_request(job_id, state, current.get('sha') if current else None)
-    print('Multiple audio tracks found. Select audio in the Vercel page; encoding is paused for up to 20 minutes.', flush=True)
     deadline = clock() + wait_seconds
+    state['expires_at'] = int(time.time() + wait_seconds)
+    print('Multiple audio tracks found. Waiting for audio track selection in the control page. Maximum wait: 10 minutes; encoding has not started.', flush=True)
+    audio_job_request(job_id, state, current.get('sha') if current else None)
+    last_report = clock()
     while True:
         remaining = deadline - clock()
         if remaining <= 0:
             break
-        pause(min(90, remaining))
         current = audio_job_request(job_id)
+        if clock() >= deadline:
+            break
         updated = json.loads(base64.b64decode(current['content']).decode())
         if updated.get('job') != job_id or updated.get('run_id') != state['run_id']:
             raise ValueError('Audio selection does not match this run')
@@ -674,14 +693,18 @@ def portal_audio_selection(streams, choice, pause=time.sleep, clock=time.monoton
         if type(selected) is int and 0 <= selected < len(tracks) and updated.get('status') == 'selected':
             updated['status'] = 'encoding'
             audio_job_request(job_id, updated, current['sha'])
-            print('Selected audio confirmed; starting encoding', flush=True)
-            return audio_selection(streams, str(selected))
+            print('Selected audio confirmed; resuming this run now. Preparing parallel encoding jobs.', flush=True)
+            return audio_selection(streams, str(selected), list_tracks=False)
+        if clock() - last_report >= 15:
+            print(f'Waiting for audio selection in the control page; {max(0, int(deadline-clock()))} seconds remaining. Encoding has not started.', flush=True)
+            last_report = clock()
+        pause(min(2, max(0, deadline-clock())))
     state['status'] = 'expired'
     try:
         audio_job_request(job_id, state, current['sha'])
     except Exception:
         pass
-    print('::error::Audio selection timed out after 20 minutes. No encode or upload was started.')
+    print('::error::Audio selection timed out after 10 minutes. No encode or upload was started.')
     raise ValueError('Audio selection timed out')
 
 
@@ -892,7 +915,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.19-github-only-parallel', flush=True)
+    print('CLIXARENA pipeline version 2026.10.19-audio-wait-10m', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
