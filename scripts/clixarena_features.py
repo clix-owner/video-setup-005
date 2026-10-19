@@ -262,11 +262,11 @@ def filter_graph(width, height, options, logo_size=None):
     return graph
 
 
-def encode_progress(args, duration, timeout=16000):
+def encode_progress(args, duration, timeout=16000, output="clixarena.mp4"):
     started = time.monotonic()
     last_report = 0
     with open('encode-private.log', 'w', encoding='utf-8') as errors:
-        process = subprocess.Popen(args + ['-progress', 'pipe:1', '-nostats', 'clixarena.mp4'],
+        process = subprocess.Popen(args + ['-progress', 'pipe:1', '-nostats', str(output)],
                                    stdout=subprocess.PIPE, stderr=errors, text=True)
         # A watchdog bounds even an encoder that stops emitting progress.
         import threading
@@ -296,3 +296,4 @@ def encode_progress(args, duration, timeout=16000):
             if process.poll() is None:
                 process.kill()
                 process.wait()
+            process.stdout.close()

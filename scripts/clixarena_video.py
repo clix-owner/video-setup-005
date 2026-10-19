@@ -555,30 +555,26 @@ def audio_encoding_args(streams, audio_map):
 
 
 def soft_mp4_args(streams, audio_map, duration, crf, language='sin', options=None):
-    video = next(s for s in streams if s.get('codec_type') == 'video')
-    options=dict(options or {})
-    width,height=video_dimensions(video,options.get('height'))
-    options.update(subtitle_enabled=False,parts={'logo':False,'name':False,'message':False},
-                   content_size=fitted_dimensions(video,width,height))
-    # Watermark/resize affect pixels; switchable captions remain a separate input.
-    filters=filter_graph(width,height,options)
-    print('Encoding H.264 with selected resolution'+(' and CLIXARENA watermark' if options.get('watermark_enabled',True) else '; watermark disabled')+'; subtitles remain switchable',flush=True)
-    args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-            '-i', 'source.video', '-sub_charenc', 'UTF-8', '-i', 'sinhala.srt',
-            '-filter_complex',filters,'-map','[video]','-map',audio_map,'-map','1:s:0',
-            '-map_metadata','-1','-map_chapters','-1',
-            '-c:v','libx264','-preset',options.get('preset','veryfast'),'-crf',str(crf),'-pix_fmt','yuv420p']
-    args += audio_encoding_args(streams,audio_map)
+    video=next(s for s in streams if s.get('codec_type')=='video')
+    args=['ffmpeg','-nostdin','-hide_banner','-loglevel','error','-y',
+          '-i','source.video','-sub_charenc','UTF-8','-i','sinhala.srt',
+          '-map','0:v:0','-map',audio_map,'-map','1:s:0','-map_metadata','-1','-map_chapters','-1']
+    if video.get('codec_name')=='h264':
+        print('H.264 video: copying without re-encoding',flush=True)
+        args+=['-c:v','copy']
+    else:
+        print('Source video is not H.264: converting video to H.264',flush=True)
+        args+=['-c:v','libx264','-preset','veryfast','-crf','23','-pix_fmt','yuv420p']
+    args+=audio_encoding_args(streams,audio_map)
     audio=[s for s in streams if s.get('codec_type')=='audio']
     if audio:
         selected=audio[int(audio_map.split(':')[-1].rstrip('?'))]
         code=selected.get('tags',{}).get('language','')
         if re.fullmatch('[a-z]{2,3}',code):args+=['-metadata:s:a:0','language='+code]
         args+=['-disposition:a:0','default']
-    args += ['-c:s','mov_text','-metadata:s:s:0','language='+language,
-             '-metadata:s:s:0','title='+('Sinhala' if language=='sin' else 'English'),'-disposition:s:0','0',
-             '-t',str(duration),'-movflags','+faststart']
-    return args
+    return args+['-c:s','mov_text','-metadata:s:s:0','language='+language,
+                 '-metadata:s:s:0','title='+('Sinhala' if language=='sin' else 'English'),'-disposition:s:0','0',
+                 '-t',str(duration),'-movflags','+faststart']
 
 
 def transfer_mp4_args(streams, crf=23, preset='veryfast'):
@@ -896,7 +892,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.19-watermark-toggle', flush=True)
+    print('CLIXARENA pipeline version 2026.10.19-github-only-parallel', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
@@ -907,6 +903,12 @@ def main():
         if method != 'burn':
             os.environ['TITLE_ANIMATION'] = 'false'
         options = settings()
+        if method=='soft':
+            if os.getenv('DISTRIBUTED_PREPARE') == 'true':
+                options.update(watermark_enabled=False,audio='ask')
+                if os.getenv('CRF','auto') == 'auto': options['crf']=18
+            else:
+                options.update(height=None,watermark_enabled=False,audio='ask',crf=23,preset='veryfast')
         if json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}').get('mapping') and not sample_only:
             mapping_password()
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -963,6 +965,10 @@ def main():
                         raise DownloadError('Source video has no valid duration metadata.') from None
                     if shutil.disk_usage('.').free < path.stat().st_size * 2 + 2 * 1024**3:
                         raise DownloadError('Insufficient runner disk space to prepare MP4.')
+                    if os.getenv('DISTRIBUTED_PREPARE')=='true' and next(t for t in info['streams'] if t.get('codec_type')=='video').get('codec_name')!='h264':
+                        from clixarena_distributed import prepare
+                        prepare(original,info['streams'],None,duration,options,method='transfer',source=str(path))
+                        return 0
                     stage = 'MP4 preparation without added subtitles'
                     encode_progress(transfer_mp4_args(info['streams'], options['crf'], options['preset']), duration)
                     stage = 'output MP4 validation'
@@ -1061,7 +1067,10 @@ def main():
                 video_stream = next(s for s in source['streams'] if s['codec_type'] == 'video')
                 width, height = video_dimensions(video_stream, options['height'])
                 options['content_size']=fitted_dimensions(video_stream,width,height)
-                print(f'Output {width} x {height}, H.264 CRF {options["crf"]}, preset {options["preset"]}', flush=True)
+                if method=='soft':
+                    print('On/off MP4: original resolution, selected audio only, no watermark',flush=True)
+                else:
+                    print(f'Output {width} x {height}, H.264 CRF {options["crf"]}, preset {options["preset"]}', flush=True)
                 if any(options['parts'].values()) and options['start'] >= expected_duration:
                     print('::warning::Title timestamp is outside this encode. It will not appear; choose a timestamp within the sample/full video duration.')
                 logo_input_duration = 0
@@ -1077,6 +1086,10 @@ def main():
                     print(f'Logo prepared once at {display_width} x {display_height}; animation input ends after its display window', flush=True)
                 else:
                     logo_size = None
+                if os.getenv('DISTRIBUTED_PREPARE')=='true':
+                    from clixarena_distributed import prepare
+                    prepare(original,source['streams'],audio_map,expected_duration,options,language,method,logo_size=logo_size)
+                    return 0
                 if method == 'soft':
                     stage = 'MP4 with selected switchable subtitles'
                     args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'], language,options)
@@ -1098,7 +1111,7 @@ def main():
                 stage = 'output MP4 validation'
                 output = probe('clixarena.mp4')
                 streams = output['streams']
-                if method in ('burn','soft'):
+                if method=='burn':
                     encoded_video=next((s for s in streams if s.get('codec_type')=='video'),{})
                     if (encoded_video.get('width'),encoded_video.get('height'))!=(width,height):
                         raise DownloadError('Output frame dimensions differ from the selected resolution. Upload was not started.')
