@@ -49,6 +49,9 @@ def settings():
     if parts['logo'] and not os.getenv('TMDB_URL', '').strip():
         raise ValueError('TMDB URL required for enabled logo')
     layout = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+    watermark_enabled=layout.get('watermarkEnabled',True)
+    if type(watermark_enabled) is not bool:
+        raise ValueError('Invalid watermark enable option')
     subtitle_enabled = layout.get('subtitleEnabled', True)
     if type(subtitle_enabled) is not bool:
         raise ValueError('Invalid subtitle enable option')
@@ -74,7 +77,7 @@ def settings():
             raise ValueError('Invalid overlay text color')
         styles[key] = {'size': number(style.get('size', default), 8, 160, 'overlay font size'), 'color': color.upper()}
     return {'layout': {'positions': positions, 'message': message, 'styles': styles, 'logoScale': logo_scale}, 'parts': parts, 'preset': preset, 'height': height, 'crf': crf, 'start': start, 'duration': duration,
-            'subtitle_enabled': subtitle_enabled, 'subtitle_language': subtitle_language, 'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
+            'watermark_enabled':watermark_enabled, 'subtitle_enabled': subtitle_enabled, 'subtitle_language': subtitle_language, 'audio': os.getenv('AUDIO_TRACK', 'auto').strip(),
             'tmdb': os.getenv('TMDB_URL', '').strip()}
 
 
@@ -240,7 +243,10 @@ def filter_graph(width, height, options, logo_size=None):
         base += f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,'
     if options.get('subtitle_enabled', True):
         base += 'ass=subtitles.ass:fontsdir=fonts:shaping=complex,'
-    base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'
+    if options.get('watermark_enabled',True):
+        base += 'drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text=CLIXARENA:fontsize=h/44:fontcolor=white@0.55:x=w/136:y=h-th-h/38'
+    else:
+        base=base.rstrip(',')
     text = any(options.get('parts', {'name': bool(logo_size), 'message': bool(logo_size)})[key] for key in ('name', 'message'))
     if not logo_size:
         return base + (',ass=intro.ass:fontsdir=fonts:shaping=complex' if text else '') + '[video]'

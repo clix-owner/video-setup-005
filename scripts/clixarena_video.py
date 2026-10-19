@@ -554,28 +554,30 @@ def audio_encoding_args(streams, audio_map):
     return ['-c:a', 'aac', '-b:a', '192k']
 
 
-def soft_mp4_args(streams, audio_map, duration, crf, language='sin'):
+def soft_mp4_args(streams, audio_map, duration, crf, language='sin', options=None):
     video = next(s for s in streams if s.get('codec_type') == 'video')
+    options=dict(options or {})
+    width,height=video_dimensions(video,options.get('height'))
+    options.update(subtitle_enabled=False,parts={'logo':False,'name':False,'message':False},
+                   content_size=fitted_dimensions(video,width,height))
+    # Watermark/resize affect pixels; switchable captions remain a separate input.
+    filters=filter_graph(width,height,options)
+    print('Encoding H.264 with selected resolution'+(' and CLIXARENA watermark' if options.get('watermark_enabled',True) else '; watermark disabled')+'; subtitles remain switchable',flush=True)
     args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
             '-i', 'source.video', '-sub_charenc', 'UTF-8', '-i', 'sinhala.srt',
-            '-map', '0:v:0', '-map', audio_map, '-map', '1:s:0',
-            '-map_metadata', '-1', '-map_chapters', '-1']
-    if video.get('codec_name') == 'h264':
-        print('H.264 video: copying without re-encoding', flush=True)
-        args += ['-c:v', 'copy']
-    else:
-        print('Source video is not H.264: converting video to H.264', flush=True)
-        args += ['-c:v', 'libx264', '-preset', 'fast', '-crf', str(crf), '-pix_fmt', 'yuv420p']
-    audio = [s for s in streams if s.get('codec_type') == 'audio']
-    if audio_map.endswith('?') and not audio:
-        pass
-    else:
-        index = int(audio_map.split(':')[-1].rstrip('?'))
-        selected = audio[index]
-        args += ['-c:a', 'copy'] if selected.get('codec_name') == 'aac' else ['-c:a', 'aac', '-b:a', '192k']
-    args += ['-c:s', 'mov_text', '-metadata:s:s:0', 'language=' + language,
-             '-metadata:s:s:0', 'title=' + ('Sinhala' if language == 'sin' else 'English'), '-disposition:s:0', '0',
-             '-t', str(duration), '-movflags', '+faststart']
+            '-filter_complex',filters,'-map','[video]','-map',audio_map,'-map','1:s:0',
+            '-map_metadata','-1','-map_chapters','-1',
+            '-c:v','libx264','-preset',options.get('preset','veryfast'),'-crf',str(crf),'-pix_fmt','yuv420p']
+    args += audio_encoding_args(streams,audio_map)
+    audio=[s for s in streams if s.get('codec_type')=='audio']
+    if audio:
+        selected=audio[int(audio_map.split(':')[-1].rstrip('?'))]
+        code=selected.get('tags',{}).get('language','')
+        if re.fullmatch('[a-z]{2,3}',code):args+=['-metadata:s:a:0','language='+code]
+        args+=['-disposition:a:0','default']
+    args += ['-c:s','mov_text','-metadata:s:s:0','language='+language,
+             '-metadata:s:s:0','title='+('Sinhala' if language=='sin' else 'English'),'-disposition:s:0','0',
+             '-t',str(duration),'-movflags','+faststart']
     return args
 
 
@@ -894,7 +896,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.18-standard-resolutions', flush=True)
+    print('CLIXARENA pipeline version 2026.10.19-watermark-toggle', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
@@ -1077,12 +1079,12 @@ def main():
                     logo_size = None
                 if method == 'soft':
                     stage = 'MP4 with selected switchable subtitles'
-                    args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'], language)
+                    args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'], language,options)
                     print('Preparing MP4 with one ' + language_name + ' subtitle track; removing all source subtitle tracks', flush=True)
                     encode_progress(args, expected_duration)
                 else:
                     stage = 'encoding'
-                    print('Encoding H.264/AAC with watermark' + (' and ' + language_name + ' subtitles' if burn_subtitles else '; subtitles disabled'), flush=True)
+                    print('Encoding H.264/AAC'+(' with watermark' if options['watermark_enabled'] else '; watermark disabled') + (' and ' + language_name + ' subtitles' if burn_subtitles else '; subtitles disabled'), flush=True)
                     filters = filter_graph(width, height, options, logo_size)
                     inputs = ['-i', 'source.video']
                     if logo_size:
@@ -1096,7 +1098,7 @@ def main():
                 stage = 'output MP4 validation'
                 output = probe('clixarena.mp4')
                 streams = output['streams']
-                if method=='burn':
+                if method in ('burn','soft'):
                     encoded_video=next((s for s in streams if s.get('codec_type')=='video'),{})
                     if (encoded_video.get('width'),encoded_video.get('height'))!=(width,height):
                         raise DownloadError('Output frame dimensions differ from the selected resolution. Upload was not started.')
@@ -1105,6 +1107,9 @@ def main():
                 if abs(expected_duration - float(output['format']['duration'])) > 2:
                     raise DownloadError(f'Output validation failed: source duration {expected_duration:.3f}s; MP4 duration {float(output["format"]["duration"]):.3f}s; difference exceeds 2 seconds. Upload was not started.')
                 if method == 'soft':
+                    selected_audio_count=1 if any(s.get('codec_type')=='audio' for s in source['streams']) else 0
+                    if sum(s.get('codec_type')=='audio' for s in streams)!=selected_audio_count:
+                        raise DownloadError('Output must contain only the selected audio track. Upload was not started.')
                     subtitles = [s for s in streams if s.get('codec_type') == 'subtitle']
                     if len(subtitles) != 1 or subtitles[0].get('codec_name') != 'mov_text' or subtitles[0].get('tags', {}).get('language') != language:
                         raise ValueError('Output must contain only the selected subtitle track')

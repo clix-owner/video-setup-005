@@ -45,7 +45,7 @@ on:
         required: true
         type: string
       quality:
-        description: Output resolution and quality (never upscales)
+        description: Burn/on-off standard frame size and quality; Original preserves source dimensions
         required: true
         default: 720p - Balanced
         type: choice
