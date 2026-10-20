@@ -1,5 +1,6 @@
 """Manual Actions media pipeline. Never print remote responses or credentials."""
 import base64
+from clixarena_upload_metrics import run_upload, file_size, timed_stage, timed_call
 import hashlib
 import http.cookiejar
 import http.client
@@ -500,19 +501,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def upload(path, login, key):
-    with path.open('rb') as file:
-        digest = hashlib.file_digest(file, 'sha256').hexdigest()
-    result = api('file/ul', {'login': login, 'key': key, 'sha256': digest})
+    with timed_stage('Streamtape checksum preparation'):
+        with path.open('rb') as file:
+            digest = hashlib.file_digest(file, 'sha256').hexdigest()
+    result = timed_call('Streamtape upload-server lookup',api,'file/ul', {'login': login, 'key': key, 'sha256': digest})
     url = result.get('url', '')
     validate_url(url)
     mask(url)
     # curl streams the multipart file. URL is supplied over stdin, never argv.
     escaped = url.replace('\\', '\\\\').replace('"', '\\"')
     config = 'url = "' + escaped + '"\n'
-    response = subprocess.run(['curl', '--config', '-', '--silent', '--fail',
+    response = run_upload(['curl', '--config', '-', '--silent', '--fail',
                                '--proto', '=https', '--connect-timeout', '30',
                                '--max-time', '3600', '--form', 'file1=@' + str(path)],
-                              input=config, capture_output=True, text=True, timeout=3610)
+                              input=config, capture_output=True, text=True, timeout=3610,label='Streamtape',size=file_size(path))
     if response.returncode:
         raise ValueError('Upload failed or timed out; check account before rerunning')
     body = json.loads(response.stdout)
@@ -521,7 +523,7 @@ def upload(path, login, key):
     file_id = body.get('result', {}).get('id', '')
     if not isinstance(file_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', file_id):
         raise ValueError('Upload response has no valid file ID; check account before rerunning')
-    info = api('file/info', {'login': login, 'key': key, 'file': file_id}).get(file_id, {})
+    info = timed_call('Streamtape uploaded-file verification',api,'file/info', {'login': login, 'key': key, 'file': file_id}).get(file_id, {})
     if info.get('status') != 200 or int(info.get('size', -1)) != path.stat().st_size:
         raise ValueError('Uploaded file could not be verified; check account before rerunning')
     return file_id
@@ -857,11 +859,11 @@ def complete_upload_one(path, output_name, values, provider):
         except Exception:raise DownloadError('Abyss upload failed or response was not verified. Check Abyss before uploading again; no automatic retry.') from None
         print('Abyss upload accepted',flush=True)
         mapping_saved=True
-        try:save_mapping(file_id,'abyss')
+        try:timed_call('Abyss mapping save',save_mapping,file_id,'abyss')
         except Exception:
             mapping_saved=False
             print('::warning::Abyss upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)
-        verified,named=verify_abyss(file_id,values['ABYSS_API_KEY'],path.stat().st_size,output_name)
+        verified,named=timed_call('Abyss metadata verification',verify_abyss,file_id,values['ABYSS_API_KEY'],path.stat().st_size,output_name)
         if not verified:print('::warning::Abyss upload accepted; metadata verification is pending. Check the Abyss manager before uploading again.',flush=True)
         elif not named:print('::warning::Abyss upload verified, but the stored filename differs. Check the Abyss manager; do not upload again.',flush=True)
         if not mapping_saved:raise DownloadError('Abyss upload accepted, but mapping save failed. Recover the encrypted mapping receipt and check repository access; do not upload the video again.')
@@ -877,11 +879,11 @@ def complete_upload_one(path, output_name, values, provider):
         except Exception:raise DownloadError('StreamHG upload failed or response was not verified. Check StreamHG before uploading again; no automatic retry.') from None
         print('StreamHG upload accepted',flush=True)
         mapping_saved=True
-        try:save_mapping(file_id,'streamhg')
+        try:timed_call('StreamHG mapping save',save_mapping,file_id,'streamhg')
         except Exception:
             mapping_saved=False
             print('::warning::StreamHG upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)
-        verified,named=verify_streamhg(file_id,values['STREAMHG_API_KEY'],path.stat().st_size,output_name)
+        verified,named=timed_call('StreamHG metadata verification',verify_streamhg,file_id,values['STREAMHG_API_KEY'],path.stat().st_size,output_name)
         if not verified:print('::warning::StreamHG upload accepted; metadata verification is pending. Check the StreamHG manager before uploading again.',flush=True)
         elif not named:print('::warning::StreamHG upload verified, but the stored filename differs. Check the StreamHG manager; do not upload again.',flush=True)
         if not mapping_saved:raise DownloadError('StreamHG upload accepted, but mapping save failed. Recover the encrypted mapping receipt and check repository access; do not upload the video again.')
@@ -893,7 +895,7 @@ def complete_upload_one(path, output_name, values, provider):
     print('Uploading video to Streamtape', flush=True)
     file_id = upload(path, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
     try:
-        save_mapping(file_id)
+        timed_call('Streamtape mapping save',save_mapping,file_id)
     except Exception:
         raise DownloadError('Streamtape upload accepted, but mapping save failed. Recover the encrypted mapping receipt; do not upload again.') from None
     # Keep user names out of shell, FFmpeg paths and curl form syntax.
@@ -901,7 +903,7 @@ def complete_upload_one(path, output_name, values, provider):
                   'key': values['STREAMTAPE_KEY'], 'file': file_id, 'name': output_name})
     if renamed is not True:
         raise ValueError('Streamtape filename update failed')
-    filename_verified = verify_filename(file_id, output_name, values['STREAMTAPE_LOGIN'], values['STREAMTAPE_KEY'])
+    filename_verified = timed_call('Streamtape filename verification',verify_filename,file_id,output_name,values['STREAMTAPE_LOGIN'],values['STREAMTAPE_KEY'])
     if not filename_verified:
         print('::warning::Upload verified and rename accepted, but the final filename could not be confirmed. Check the filename in Streamtape file manager; do not rerun just for this warning.')
     # Do not construct, print, summarize or export a Streamtape video URL/ID.
@@ -915,7 +917,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.19-audio-wait-10m', flush=True)
+    print('CLIXARENA pipeline version 2026.10.20-upload-metrics', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}

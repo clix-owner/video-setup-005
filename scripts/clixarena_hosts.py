@@ -1,5 +1,6 @@
 """Upload providers and backward-compatible mappings. No upload retries."""
 import json,re,subprocess,time,urllib.parse,urllib.request,urllib.error
+from clixarena_upload_metrics import run_upload, file_size, timed_call
 
 
 def selected_host(layout):
@@ -75,7 +76,7 @@ def upload_streamhg(path,name,key,mask=lambda _:None,run=subprocess.run,validate
     if any(c in name for c in ('\r','\n','\x00')):raise HostError('StreamHG configuration: invalid output name.')
     mask(key)
     print('Requesting StreamHG upload server',flush=True)
-    server=streamhg_api('upload/server',key).get('result')
+    server=timed_call('StreamHG upload-server lookup',streamhg_api,'upload/server',key).get('result')
     if not isinstance(server,str):raise HostError('StreamHG server discovery: upload URL missing in response; upload not started.')
     try:
         parsed=urllib.parse.urlsplit(server)
@@ -96,10 +97,10 @@ def upload_streamhg(path,name,key,mask=lambda _:None,run=subprocess.run,validate
     config='url = "'+quote(server)+'"\nform-string = "'+quote('key='+key)+'"\n'
     config+='form-string = "'+quote('file_title='+name.removesuffix('.mp4'))+'"\n'
     try:
-        response=run(['curl','--config','-','--silent','--fail','--proto','=https',
+        response=run_upload(['curl','--config','-','--silent','--fail','--proto','=https',
             '--user-agent','Mozilla/5.0','--connect-timeout','30','--max-time','3600',
             '--write-out','\nCLIXARENA_HTTP:%{http_code}','--form',
-            'file=@"'+local+'";filename="'+filename+'"'],input=config,capture_output=True,text=True,timeout=3610)
+            'file=@"'+local+'";filename="'+filename+'"'],input=config,capture_output=True,text=True,timeout=3610,runner=run,label='StreamHG',size=file_size(path))
     except subprocess.TimeoutExpired:
         raise HostError('StreamHG file upload: timed out. Upload state is uncertain; check the account before retrying.') from None
     except Exception:
@@ -152,7 +153,7 @@ def upload_abyss(path,name,key,mask=lambda _:None,run=subprocess.run):
     escaped=url.replace('\\','\\\\').replace('"','\\"')
     filename=name.replace('\\','\\\\').replace('"','\\"')
     form='file=@'+str(path)+';filename="'+filename+'"'
-    response=run(['curl','--config','-','--silent','--fail','--proto','=https','--connect-timeout','30','--max-time','3600','--form',form],input='url = "'+escaped+'"\n',capture_output=True,text=True,timeout=3610)
+    response=run_upload(['curl','--config','-','--silent','--fail','--proto','=https','--connect-timeout','30','--max-time','3600','--form',form],input='url = "'+escaped+'"\n',capture_output=True,text=True,timeout=3610,runner=run,label='Abyss',size=file_size(path))
     if response.returncode:raise ValueError('Abyss upload failed or timed out. Check the account before uploading again.')
     try:body=json.loads(response.stdout)
     except (ValueError,TypeError):raise ValueError('Abyss upload response was not understood. Check account before uploading again.') from None
