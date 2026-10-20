@@ -1,5 +1,5 @@
 name: CLIXARENA video encode and upload
-run-name: CLIXARENA · ${{ inputs.output_name }} · ${{ inputs.job_id || inputs.subtitle_path }}
+run-name: CLIXARENA Â· ${{ inputs.output_name }} Â· ${{ inputs.job_id || inputs.subtitle_path }}
 on:
   workflow_dispatch:
     inputs:
@@ -199,15 +199,15 @@ jobs:
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
-      - name: Stage selected audio/subtitle
+      - name: Stage source audio/subtitle for parallel companion
         if: ${{ steps.video.outputs.distributed == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: parallel-companion
+          name: parallel-companion-source
           path: |
             parallel-media/ready.txt
-            parallel-media/companion.mkv
-            parallel-media/audio.m4a
+            parallel-media/companion-source.mkv
+            parallel-media/audio-source.mka
             parallel-media/subtitle.srt
           compression-level: 0
           retention-days: 1
@@ -277,13 +277,55 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: parallel-encoded-${{ matrix.chunk }}
-          path: parallel-media/encoded-*.mp4
+          path: |
+            parallel-media/encoded-*.mp4
+            parallel-media/encoded-*.json
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+  companion:
+    name: Prepare audio alongside video workers
+    needs: encode
+    if: ${{ needs.encode.outputs.distributed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 125
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
+          persist-credentials: false
+      - name: Install audio tools
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: parallel-manifest
+          path: parallel-media
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: parallel-companion-source
+          path: parallel-media
+      - name: Prepare and validate AAC companion
+        run: python3 -u scripts/clixarena_distributed.py companion
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: parallel-companion
+          path: |
+            parallel-media/ready.txt
+            parallel-media/companion.mkv
+            parallel-media/audio.m4a
+            parallel-media/subtitle.srt
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
   finalize:
     name: Join, validate and upload MP4
-    needs: [encode, chunks]
+    needs: [encode, chunks, companion]
     if: ${{ success() && needs.encode.outputs.distributed == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350

@@ -17,7 +17,7 @@ class DistributedTests(unittest.TestCase):
    root=Path(tmp)
    try:
     os.chdir(root)
-    (root/'sinhala.srt').write_text('1\n00:00:01,000 --> 00:00:06,000\nසිංහල පරීක්ෂණය\n',encoding='utf-8')
+    (root/'sinhala.srt').write_text('1\n00:00:01,000 --> 00:00:06,000\nà·ƒà·’à¶‚à·„à¶½ à¶´à¶»à·“à¶šà·Šà·‚à¶«à¶º\n',encoding='utf-8')
     (root/'old.srt').write_text('1\n00:00:00,000 --> 00:00:07,000\nOLD CAPTION\n',encoding='utf-8')
     d.ff('-f','lavfi','-i','testsrc2=size=640x266:rate=24:duration=8','-f','lavfi','-i','sine=frequency=440:duration=8','-f','lavfi','-i','sine=frequency=880:duration=8,asetpts=PTS+0.5/TB','-i','old.srt','-map','0:v','-map','1:a','-map','2:a','-map','3:s','-c:v','libx264','-preset','veryfast','-g',24,'-sc_threshold',0,'-c:a','aac','-c:s','srt','-metadata:s:a:0','language=hin','-metadata:s:a:1','language=tam','-t',8,'-f','matroska','source.video')
     source=d.info('source.video')
@@ -26,14 +26,14 @@ class DistributedTests(unittest.TestCase):
      manifest=d.manifest();self.assertEqual(manifest['count'],4)
      with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
       list(pool.map(d.worker,range(4)))
-     d.merge()
+     d.companion();d.merge()
     result=d.info('clixarena.mp4');v=d.video(result)
     self.assertEqual(d.packets(result),d.packets(source));self.assertEqual(d.packets(result),192)
     self.assertEqual((v['width'],v['height']),(640,360))
     audios=[s for s in result['streams'] if s['codec_type']=='audio'];self.assertEqual(len(audios),1);self.assertEqual(audios[0]['tags']['language'],'tam');self.assertAlmostEqual(float(audios[0]['start_time']),d.manifest()['audio_offset'],delta=0.06)
     self.assertLess(abs(float(result['format']['duration'])-8),0.15)
     text=d.run(['ffmpeg','-v','error','-i','clixarena.mp4','-map','0:s:0','-f','srt','-']).decode('utf-8')
-    self.assertIn('සිංහල පරීක්ෂණය',text);self.assertNotIn('OLD CAPTION',text)
+    self.assertIn('à·ƒà·’à¶‚à·„à¶½ à¶´à¶»à·“à¶šà·Šà·‚à¶«à¶º',text);self.assertNotIn('OLD CAPTION',text)
     with patch('clixarena_video.complete_upload') as upload:
      (d.ROOT/'encoded-03.mp4').unlink()
      with self.assertRaises((RuntimeError,FileNotFoundError)):d.merge()
@@ -54,7 +54,7 @@ class DistributedTests(unittest.TestCase):
     with patch.dict(os.environ,{'GITHUB_OUTPUT':str(root/'outputs'),'SAMPLE_ONLY':'true'}):
      d.prepare(root,source['streams'],'0:a:0?',1.5,{'preset':'veryfast','crf':20},'eng')
      self.assertEqual(d.manifest()['count'],1)
-     d.worker(0);d.merge()
+     d.worker(0);d.companion();d.merge()
     result=d.info('clixarena.mp4')
     self.assertEqual(d.packets(result),36)
     self.assertEqual(sum(s['codec_type']=='audio' for s in result['streams']),0)
@@ -81,7 +81,7 @@ class DistributedTests(unittest.TestCase):
       result=subprocess.run([sys.executable,str(script),'worker','--index',str(i)],cwd=root,capture_output=True)
       self.assertEqual(result.returncode,0,result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
      with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:list(pool.map(execute,range(4)))
-     d.merge()
+     d.companion();d.merge()
     output=d.info('clixarena.mp4');self.assertEqual(d.packets(output),192)
     self.assertFalse(any(t['codec_type']=='subtitle' for t in output['streams']))
     def pixels(t):
@@ -108,7 +108,7 @@ class DistributedTests(unittest.TestCase):
      d.prepare(root,d.info('transfer.video')['streams'],None,4,{'height':None,'preset':'veryfast','crf':20},method='transfer',source='transfer.video')
      self.assertEqual(d.manifest()['count'],4)
      with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:list(pool.map(d.worker,range(4)))
-     d.merge()
+     d.companion();d.merge()
     output=d.info('clixarena.mp4');self.assertEqual(d.packets(output),48)
     self.assertEqual((d.video(output)['width'],d.video(output)['height']),(320,180))
     audios=[t for t in output['streams'] if t['codec_type']=='audio'];self.assertEqual(len(audios),2);self.assertTrue(all(t['codec_name']=='aac' for t in audios))
@@ -119,9 +119,9 @@ class DistributedTests(unittest.TestCase):
  def test_workflow_uses_four_real_jobs_and_only_successful_finalization(self):
   workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/clixarena-video.yml').read_text(encoding='utf-8')
   self.assertIn('max-parallel: 4',workflow)
-  self.assertIn('needs: [encode, chunks]',workflow)
+  self.assertIn('needs: [encode, chunks, companion]',workflow)
   self.assertIn("success() && needs.encode.outputs.distributed == 'true'",workflow)
-  worker=workflow.split('  chunks:')[1].split('  finalize:')[0]
+  worker=workflow.split('  chunks:')[1].split('  companion:')[0]
   self.assertNotIn('secrets.',worker)
   self.assertIn("DISTRIBUTED_PREPARE: 'true'",workflow)
 

@@ -961,7 +961,7 @@ def selected_runner_mode(layout,environment=None):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.20-runner-selection-fix', flush=True)
+    print('CLIXARENA pipeline version 2026.10.20-parallel-preparation', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
