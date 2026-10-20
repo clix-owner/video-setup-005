@@ -1131,12 +1131,12 @@ def main():
                     stage = 'encoding'
                     print('Encoding H.264/AAC'+(' with watermark' if options['watermark_enabled'] else '; watermark disabled') + (' and ' + language_name + ' subtitles' if burn_subtitles else '; subtitles disabled'), flush=True)
                     filters = filter_graph(width, height, options, logo_size)
-                    inputs = ['-i', 'source.video']
+                    inputs = ['-threads', '0', '-i', 'source.video']
                     if logo_size:
                         inputs += ['-itsoffset', str(options['start']), '-loop', '1', '-framerate', '30',
                                    '-t', str(logo_input_duration), '-i', 'title-logo-display.png']
                     encode_progress(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y'] + inputs +
-                             ['-map', '[video]', '-map', audio_map, '-filter_complex', filters,
+                             ['-filter_complex_threads', '4', '-map', '[video]', '-map', audio_map, '-filter_complex', filters,
                              '-c:v', 'libx264', '-preset', options['preset'], '-crf', str(options['crf']),
                              '-pix_fmt', 'yuv420p'] + audio_encoding_args(source['streams'], audio_map) + [
                              '-t', str(expected_duration), '-movflags', '+faststart'], expected_duration)
