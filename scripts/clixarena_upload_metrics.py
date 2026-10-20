@@ -53,6 +53,10 @@ def _summary(stdout,label,elapsed,ok):
 def run_upload(args,*,input,capture_output=True,text=True,timeout=3610,runner=subprocess.run,label='Streamtape',size=None):
     if label not in _LABELS:raise ValueError('Unknown upload telemetry label')
     args=list(args);previous=''
+    # Avoid curl's default one-second stall when an HTTP/1.1 upload server
+    # does not answer Expect: 100-continue. This does not add upload retries.
+    if args and args[0] == 'curl' and '--expect100-timeout' not in args:
+        args += ['--expect100-timeout','0.2']
     if '--write-out' in args:
         index=args.index('--write-out');previous=args[index+1];del args[index:index+2]
     args=[value for value in args if value!='--silent']

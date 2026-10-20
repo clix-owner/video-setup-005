@@ -17,6 +17,7 @@ class UploadMetricsTests(unittest.TestCase):
   with contextlib.redirect_stdout(output):
    result=m.run_upload(['curl','--config','-','--silent','--write-out','\nCLIXARENA_HTTP:%{http_code}','--form','file=@x.mp4'],input='url="https://private/SECRET"',runner=run,label='StreamHG',size=1048576)
   self.assertEqual(result.stdout,'{"slug":"PRIVATEID"}\nCLIXARENA_HTTP:200');self.assertEqual(len(calls),1)
+  self.assertIn('--expect100-timeout',calls[0][0]);self.assertEqual(calls[0][0][calls[0][0].index('--expect100-timeout')+1],'0.2')
   self.assertIn('average 0.50 MiB/s',output.getvalue());self.assertIn('transfer/request 2.0s',output.getvalue())
   for secret in ['PRIVATEID','SECRET','https://private']:self.assertNotIn(secret,output.getvalue())
  def test_real_subprocess_stderr_is_private_and_live_progress_is_numeric(self):

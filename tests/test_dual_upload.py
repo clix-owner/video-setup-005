@@ -1,10 +1,33 @@
-import contextlib,io,json,os,sys,tempfile,unittest
+import contextlib,io,json,os,sys,tempfile,threading,unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import clixarena_video as pipeline
 from clixarena_hosts import selected_hosts
 class DualUploadTests(unittest.TestCase):
+ def test_metadata_wait_overlaps_next_upload_but_uploads_stay_ordered(self):
+  checking=threading.Event();second=threading.Event();events=[]
+  def verify(*args):
+   checking.set()
+   if not second.wait(3):raise AssertionError('Second upload blocked behind metadata verification')
+   events.append('verified');return True,True
+  def upload_first(*args,**kwargs):events.append('first-accepted');return 'private-first'
+  def upload_second(*args,**kwargs):
+   self.assertTrue(checking.wait(3));events.append('second-accepted');second.set();return 'private-second'
+  with tempfile.TemporaryDirectory() as tmp:
+   path=Path(tmp)/'out.mp4';path.write_bytes(b'video')
+   with patch.dict(os.environ,{'OVERLAY_LAYOUT':'{"uploadHost":"streamhg","secondUploadHost":"abyss"}','GITHUB_OUTPUT':''}),patch.object(pipeline,'upload_streamhg',upload_first),patch.object(pipeline,'upload_abyss',upload_second),patch.object(pipeline,'verify_streamhg',verify),patch.object(pipeline,'verify_abyss',return_value=(True,True)),patch.object(pipeline,'save_mapping'),contextlib.redirect_stdout(io.StringIO()):
+    pipeline.complete_upload(path,'Title.mp4',{'STREAMHG_API_KEY':'secret','ABYSS_API_KEY':'secret'})
+  self.assertEqual(events[:2],['first-accepted','second-accepted']);self.assertIn('verified',events)
+  self.assertIsNone(pipeline._UPLOAD_VERIFIER.get())
+ def test_background_failure_is_joined_and_sanitized_without_retry(self):
+  calls=[];output=io.StringIO()
+  def one(p,n,v,provider):
+   calls.append(provider)
+   if provider=='abyss':pipeline.verify_accepted_upload(provider,'PRIVATEID','SECRET',1,n)
+  with patch.dict(os.environ,{'OVERLAY_LAYOUT':'{"uploadHost":"abyss","secondUploadHost":"streamhg"}'}),patch.object(pipeline,'complete_upload_one',one),patch.object(pipeline,'finish_provider_upload',side_effect=ValueError('SECRET PRIVATEID')),contextlib.redirect_stdout(output):
+   with self.assertRaises(pipeline.DownloadError):pipeline.complete_upload(Path('out.mp4'),'Title.mp4',{})
+  self.assertEqual(calls,['abyss','streamhg']);self.assertNotIn('SECRET',output.getvalue());self.assertNotIn('PRIVATEID',output.getvalue());self.assertIsNone(pipeline._UPLOAD_VERIFIER.get())
  def test_order_validation(self):
   for first,second in [('streamtape','abyss'),('abyss','streamhg'),('streamhg','streamtape')]:
    self.assertEqual(selected_hosts({'uploadHost':first,'secondUploadHost':second}),[first,second])

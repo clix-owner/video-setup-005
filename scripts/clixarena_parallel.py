@@ -1,5 +1,6 @@
 """Bounded parallel HTTPS range download; never log URLs or exceptions."""
 from concurrent.futures import ThreadPoolExecutor
+from clixarena_download_progress import DownloadProgress
 import os
 import re
 import shutil
@@ -56,6 +57,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
         return False
     consuming_full = False
     started = False
+    progress = None
     stop = threading.Event()
     headers = {'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Accept-Encoding': 'identity'}
     try:
@@ -138,6 +140,8 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
             log('Parallel download: range compatibility checks enabled', flush=True)
         log(f'Parallel video download: {connections} connections', flush=True)
         started = True
+        progress=DownloadProgress(total,connections,log)
+        progress.__enter__()
         with target.open('wb') as output:
             output.truncate(total)
 
@@ -161,6 +165,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
         def segment_once(bounds):
             try:
                 first, last = bounds
+                progress.update(0,first)
                 with open_range(first, last) as response, target.open('r+b') as output:
                     if (response.status != 206 or response.headers.get('Content-Range') != f'bytes {first}-{last}/{total}'
                             or (not compatibility and response.headers.get('ETag') != etag)
@@ -181,6 +186,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                             raise ValueError('Disk reserve reached')
                         output.write(block)
                         remaining -= len(block)
+                        progress.update(last-first+1-remaining,first)
                     if response.read(1):
                         raise ValueError('Oversized range')
             except Exception:
@@ -214,6 +220,7 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
                     output.seek(first)
                     if output.read(len(expected)) != expected or sample(first) != expected:
                         raise ValueError('Source content changed')
+        progress.finish()
         log('Download complete; validating downloaded file', flush=True)
         return True
     except Exception as error:
@@ -230,3 +237,5 @@ def _parallel_download_once(url, target, limit, opener_factory, validate, log=pr
         transient=isinstance(error,(urllib.error.URLError,TimeoutError,ConnectionError,http.client.IncompleteRead))
         if isinstance(error,urllib.error.HTTPError):transient=error.code in (408,429,500,502,503,504)
         return None if started or transient else False
+    finally:
+        if progress is not None:progress.close()

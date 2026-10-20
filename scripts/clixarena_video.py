@@ -1,5 +1,8 @@
 """Manual Actions media pipeline. Never print remote responses or credentials."""
 import base64
+from clixarena_download_progress import DownloadProgress
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from clixarena_upload_metrics import run_upload, file_size, timed_stage, timed_call
 import hashlib
 import http.cookiejar
@@ -228,12 +231,13 @@ def download(url, target, limit):
 
 
 def consume_video_response(response,target,limit):
-    with target.open('wb') as output:
+    with target.open('wb') as output, DownloadProgress() as progress:
         content_type = response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type or 'application/json' in content_type:
             raise DownloadError('The server returned a webpage or API response instead of video. Obtain a fresh direct download link.')
         total = 0
         declared_size = response.headers.get('Content-Length', '')
+        progress.total=int(declared_size) if declared_size.isdigit() and int(declared_size)>0 else None
         if declared_size.isdigit() and int(declared_size) > limit:
             raise DownloadError('Video exceeds the 12 GB download limit.')
         while block := response.read(1024 * 1024):
@@ -245,8 +249,11 @@ def consume_video_response(response,target,limit):
             if shutil.disk_usage(target.parent).free < 2 * 1024**3:
                 raise DownloadError('Runner disk space is below the 2 GB reserve.')
             output.write(block)
+            progress.update(total)
         if declared_size.isdigit() and total != int(declared_size):
             raise RetryableDownloadError('Download is incomplete after three attempts: received size differs from the server Content-Length. The host may be truncating the file or reporting an incorrect size.')
+        if not total:raise DownloadError('The server returned an empty file.')
+        progress.finish()
     if not target.stat().st_size:
         raise DownloadError('The server returned an empty file.')
     print('Download complete; validating downloaded file', flush=True)
@@ -833,20 +840,56 @@ def save_mapping(file_id,provider='streamtape'):
     raise ValueError('Mapping save could not be confirmed')
 
 
+_UPLOAD_VERIFIER = ContextVar('upload_verifier', default=None)
+
+
+def finish_provider_upload(provider,file_id,key,size,output_name):
+    label={'abyss':'Abyss','streamhg':'StreamHG'}[provider]
+    verify={'abyss':verify_abyss,'streamhg':verify_streamhg}[provider]
+    verified,named=timed_call(label+' metadata verification',verify,file_id,key,size,output_name)
+    if not verified:print('::warning::'+label+' upload accepted; metadata verification is pending. Check the host manager before uploading again.',flush=True)
+    elif not named:print('::warning::'+label+' upload verified, but the stored filename differs. Check the host manager; do not upload again.',flush=True)
+    print(label+' upload complete. Playback processing may still be pending.',flush=True)
+    if os.getenv('GITHUB_OUTPUT'):
+        with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('upload_verified='+str(verified).lower()+'\nupload_host='+provider+'\n')
+
+
+def verify_accepted_upload(provider,file_id,key,size,output_name):
+    submit=_UPLOAD_VERIFIER.get()
+    if submit is None:
+        return finish_provider_upload(provider,file_id,key,size,output_name)
+    print({'abyss':'Abyss','streamhg':'StreamHG'}[provider]+' accepted; checking metadata alongside the next destination. File uploads remain sequential.',flush=True)
+    submit(provider,finish_provider_upload,provider,file_id,key,size,output_name)
+
+
 def complete_upload(path, output_name, values):
     providers=selected_hosts(json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}'))
     if len(providers)==1:
         return complete_upload_one(path,output_name,values,providers[0])
     failures=[]
-    for index,provider in enumerate(providers,1):
-        print('Upload destination '+str(index)+' of '+str(len(providers))+': '+provider,flush=True)
+    pending=[]
+    # Only read-only metadata checks overlap. Uploads and mapping mutations
+    # stay in the user's selected order; all checks finish before job success.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def submit(provider,fn,*args):pending.append((provider,executor.submit(fn,*args)))
+        token=_UPLOAD_VERIFIER.set(submit)
         try:
-            complete_upload_one(path,output_name,values,provider)
-        except Exception as error:
-            failures.append(provider)
-            # Only our deliberately safe errors may reach the log.
-            if isinstance(error,DownloadError):print('::warning::'+str(error),flush=True)
-            print('::warning::'+provider+' upload or finalization could not be confirmed. Check that host before retrying; no automatic upload retry.',flush=True)
+            for index,provider in enumerate(providers,1):
+                print('Upload destination '+str(index)+' of '+str(len(providers))+': '+provider,flush=True)
+                try:
+                    complete_upload_one(path,output_name,values,provider)
+                except Exception as error:
+                    failures.append(provider)
+                    # Only our deliberately safe errors may reach the log.
+                    if isinstance(error,DownloadError):print('::warning::'+str(error),flush=True)
+                    print('::warning::'+provider+' upload or finalization could not be confirmed. Check that host before retrying; no automatic upload retry.',flush=True)
+        finally:
+            _UPLOAD_VERIFIER.reset(token)
+        for provider,future in pending:
+            try:future.result()
+            except Exception:
+                if provider not in failures:failures.append(provider)
+                print('::warning::'+provider+' metadata check failed after upload acceptance. Check that host; do not upload again.',flush=True)
     if failures:
         raise DownloadError('Upload incomplete for: '+', '.join(failures)+'. Other accepted uploads and mapping receipts are preserved. Do not rerun the whole job blindly.')
     print('All selected upload destinations completed.',flush=True)
@@ -863,13 +906,8 @@ def complete_upload_one(path, output_name, values, provider):
         except Exception:
             mapping_saved=False
             print('::warning::Abyss upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)
-        verified,named=timed_call('Abyss metadata verification',verify_abyss,file_id,values['ABYSS_API_KEY'],path.stat().st_size,output_name)
-        if not verified:print('::warning::Abyss upload accepted; metadata verification is pending. Check the Abyss manager before uploading again.',flush=True)
-        elif not named:print('::warning::Abyss upload verified, but the stored filename differs. Check the Abyss manager; do not upload again.',flush=True)
         if not mapping_saved:raise DownloadError('Abyss upload accepted, but mapping save failed. Recover the encrypted mapping receipt and check repository access; do not upload the video again.')
-        print('Abyss upload complete. Playback processing may still be pending.',flush=True)
-        if os.getenv('GITHUB_OUTPUT'):
-            with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('upload_verified='+str(verified).lower()+'\nupload_host=abyss\n')
+        verify_accepted_upload('abyss',file_id,values['ABYSS_API_KEY'],path.stat().st_size,output_name)
         return
 
     if provider=='streamhg':
@@ -883,13 +921,8 @@ def complete_upload_one(path, output_name, values, provider):
         except Exception:
             mapping_saved=False
             print('::warning::StreamHG upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)
-        verified,named=timed_call('StreamHG metadata verification',verify_streamhg,file_id,values['STREAMHG_API_KEY'],path.stat().st_size,output_name)
-        if not verified:print('::warning::StreamHG upload accepted; metadata verification is pending. Check the StreamHG manager before uploading again.',flush=True)
-        elif not named:print('::warning::StreamHG upload verified, but the stored filename differs. Check the StreamHG manager; do not upload again.',flush=True)
         if not mapping_saved:raise DownloadError('StreamHG upload accepted, but mapping save failed. Recover the encrypted mapping receipt and check repository access; do not upload the video again.')
-        print('StreamHG upload complete. Playback processing may still be pending.',flush=True)
-        if os.getenv('GITHUB_OUTPUT'):
-            with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('upload_verified='+str(verified).lower()+'\nupload_host=streamhg\n')
+        verify_accepted_upload('streamhg',file_id,values['STREAMHG_API_KEY'],path.stat().st_size,output_name)
         return
 
     print('Uploading video to Streamtape', flush=True)
@@ -917,7 +950,7 @@ def complete_upload_one(path, output_name, values, provider):
 
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.20-upload-metrics', flush=True)
+    print('CLIXARENA pipeline version 2026.10.20-download-progress', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
