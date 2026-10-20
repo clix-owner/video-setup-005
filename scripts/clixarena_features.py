@@ -245,7 +245,7 @@ def logo_dimensions(width, height, logo_size, scale=100):
 
 def filter_graph(width, height, options, logo_size=None):
     content_width,content_height=options.get('content_size',(width,height))
-    base = f'[0:v:0]scale={content_width}:{content_height}:flags=lanczos,setsar=1,'
+    base = f'[0:v:0]scale={content_width}:{content_height}:flags=bicubic,setsar=1,'
     if (content_width,content_height)!=(width,height):
         base += f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,'
     if options.get('subtitle_enabled', True):

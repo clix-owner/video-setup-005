@@ -20,6 +20,14 @@ on:
         description: Separate title shown in video (blank uses filename)
         type: string
         required: false
+      runner_mode:
+        description: Single runner (direct, fast, no chunk transfer) or Parallel (4 runners)
+        required: false
+        default: single
+        type: choice
+        options:
+          - single
+          - parallel
       subtitle_method:
         description: Burn, selected-language on/off subtitles, or MP4 upload without added subtitles
         required: true
@@ -50,20 +58,20 @@ on:
         default: 720p - Balanced
         type: choice
         options:
-          - 360p - High
-          - 360p - Balanced
-          - 480p - High
-          - 480p - Balanced
-          - 1440p - High
-          - 1440p - Balanced
+          - Original - High
+          - Original - Balanced
           - 2160p - High
           - 2160p - Balanced
-          - Original - High
+          - 1440p - High
+          - 1440p - Balanced
           - 1080p - High
-          - 720p - High
-          - Original - Balanced
           - 1080p - Balanced
+          - 720p - High
           - 720p - Balanced
+          - 480p - High
+          - 480p - Balanced
+          - 360p - High
+          - 360p - Balanced
       crf:
         description: CRF 0-51 (lower = higher quality/larger file); auto uses High 18 or Balanced 23
         required: true
@@ -139,7 +147,8 @@ jobs:
       - name: Download, validate, encode and upload
         id: video
         env:
-          DISTRIBUTED_PREPARE: 'true'
+          RUNNER_MODE: ${{ inputs.runner_mode || fromJSON(inputs.overlay_layout || '{}').runnerMode || 'single' }}
+          DISTRIBUTED_PREPARE: 'true' 
           MAPPING_PASSWORD: ${{ secrets.MAPPING_PASSWORD }}
           MAPPING_GITHUB_TOKEN: ${{ github.token }}
           VIDEO_URL: ${{ inputs.video_url }}

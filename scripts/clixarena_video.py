@@ -926,6 +926,12 @@ def main():
         if method != 'burn':
             os.environ['TITLE_ANIMATION'] = 'false'
         options = settings()
+        layout_cfg = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
+        runner_mode = os.getenv('RUNNER_MODE', '').strip().lower() or layout_cfg.get('runnerMode', '').strip().lower()
+        if runner_mode == 'single':
+            os.environ['DISTRIBUTED_PREPARE'] = 'false'
+        elif runner_mode == 'parallel':
+            os.environ['DISTRIBUTED_PREPARE'] = 'true'
         if method=='soft':
             if os.getenv('DISTRIBUTED_PREPARE') == 'true':
                 options.update(watermark_enabled=False,audio='ask')
@@ -1113,6 +1119,9 @@ def main():
                     from clixarena_distributed import prepare
                     prepare(original,source['streams'],audio_map,expected_duration,options,language,method,logo_size=logo_size)
                     return 0
+                if os.getenv('GITHUB_OUTPUT'):
+                    with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out_f:
+                        out_f.write('distributed=false\nmatrix=[]\n')
                 if method == 'soft':
                     stage = 'MP4 with selected switchable subtitles'
                     args = soft_mp4_args(source['streams'], audio_map, expected_duration, options['crf'], language,options)
