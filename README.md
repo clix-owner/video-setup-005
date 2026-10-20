@@ -1,11 +1,11 @@
-# Download progress update — 2026.10.20
+# Concurrent source artifact uploads — 2026.10.20
 
-Copy every file from scripts/ into the existing GitHub repository scripts/ folder, replacing matching files, then commit and push. No UI redeploy or new secrets. Only new runs use the update.
+Copy ALL .github/ and scripts/ contents into the existing repository, replacing matching files. Commit and push, including .github/actions/parallel-source-upload/dist-current and its three JavaScript bundle files plus licenses. Do not copy node_modules. No new secrets, npm install or portal redeploy required. New runs use the change when their source_commit includes this commit.
 
-Includes the previous upload telemetry/wait-reduction update.
+In Parallel runner mode only, the prepared source chunks upload as 1–4 concurrent GitHub artifacts, retaining existing artifact names and extraction paths. All files are checked before any transfer. All requests settle and must be confirmed before worker jobs start. Compression remains 0; retention remains 1 day. Each worker still downloads only its own source chunk. File transfers to Streamtape/StreamHG/Abyss remain sequential in the user-selected order.
 
-Direct HTTPS, resolved Google Drive and range-parallel downloads emit progress every 10 seconds: percentage when Content-Length is known, received/total MiB, average MiB/s, elapsed time, estimated remaining time and selected connections. Unknown-size downloads show bytes and speed without invented percentages or ETA. A heartbeat continues when data stalls. Parallel ranges aggregate downloaded bytes, resetting a retried range instead of double-counting it. Completion is printed only after download byte/range checks pass; video validation follows separately. Torrent downloads retain their existing libtorrent progress logs.
+The official @actions/artifact 6.3.1 SDK is pinned and bundled locally for Node 24 Actions runtime, with dependency lock and licenses. No extra install step is added to workflow runs. Includes previous download-progress and upload-wait patches. Encode settings, quality checks, success-only cleanup gates and failed-run preservation are unchanged.
 
-Only fixed text and numbers are logged. URLs, headers, tokens, file names and remote exception text are not printed by the new progress helper.
+Validation: 100 Python tests, 3 Node concurrency/failure tests, YAML/dependency checks; production dependency audit reports zero vulnerabilities at build time. SDK bundle loading checked locally; no authenticated artifact upload, workflow dispatch or actual host upload was performed. No measured speedup claim: shared network bandwidth, GitHub scheduling and host delays remain. Concurrent uploads can overlap transfer time; zero delay cannot be guaranteed.
 
-Includes regression tests for single-stream completion, incomplete transfers, unknown sizes, stalled heartbeats and parallel retry accounting. No remote media was downloaded and no Actions run was triggered for this update.
+Rebuild (maintainers only): run npm ci --ignore-scripts, then npm run build inside .github/actions/parallel-source-upload using the locked dependencies. Commit dist-current output and licenses.

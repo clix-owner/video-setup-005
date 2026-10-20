@@ -177,42 +177,11 @@ jobs:
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
         run: python3 -u scripts/clixarena_video.py
-      - name: Stage source chunk 1
-        if: ${{ steps.video.outputs.distributed == 'true' && contains(fromJSON(steps.video.outputs.matrix), 0) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Stage source chunks concurrently
+        if: ${{ steps.video.outputs.distributed == 'true' }}
+        uses: ./.github/actions/parallel-source-upload
         with:
-          name: parallel-source-0
-          path: parallel-media/part-00.mkv
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-      - name: Stage source chunk 2
-        if: ${{ steps.video.outputs.distributed == 'true' && contains(fromJSON(steps.video.outputs.matrix), 1) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: parallel-source-1
-          path: parallel-media/part-01.mkv
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-      - name: Stage source chunk 3
-        if: ${{ steps.video.outputs.distributed == 'true' && contains(fromJSON(steps.video.outputs.matrix), 2) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: parallel-source-2
-          path: parallel-media/part-02.mkv
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-      - name: Stage source chunk 4
-        if: ${{ steps.video.outputs.distributed == 'true' && contains(fromJSON(steps.video.outputs.matrix), 3) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: parallel-source-3
-          path: parallel-media/part-03.mkv
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
+          matrix: ${{ steps.video.outputs.matrix }}
       - name: Stage encoding manifest
         if: ${{ steps.video.outputs.distributed == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
