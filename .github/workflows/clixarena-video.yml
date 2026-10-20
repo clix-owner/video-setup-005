@@ -147,7 +147,7 @@ jobs:
       - name: Download, validate, encode and upload
         id: video
         env:
-          RUNNER_MODE: ${{ inputs.runner_mode || fromJSON(inputs.overlay_layout || '{}').runnerMode || 'single' }}
+          RUNNER_MODE: ${{ fromJSON(inputs.overlay_layout || '{}').runnerMode || inputs.runner_mode || 'single' }}
           # Legacy test compatibility: DISTRIBUTED_PREPARE: 'true'
           DISTRIBUTED_PREPARE: 'false' 
           MAPPING_PASSWORD: ${{ secrets.MAPPING_PASSWORD }}

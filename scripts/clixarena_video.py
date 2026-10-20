@@ -948,9 +948,20 @@ def complete_upload_one(path, output_name, values, provider):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as file:
             file.write('### Upload verified\nRename request accepted. Final filename ' + ('verified' if filename_verified else 'not confirmed; check it in Streamtape file manager. Do not re-upload solely for this warning') + '.\nFind the video in your Streamtape file manager. Video URLs and file IDs are not included in logs, summaries or outputs. Playback processing may still be pending.\n')
 
+def selected_runner_mode(layout,environment=None):
+    # GitHub injects the workflow input's default "single" even when the UI
+    # dispatch supplied "parallel" inside overlay_layout. UI selection wins.
+    value=layout.get('runnerMode')
+    if value is None or value=='':
+        value=(os.getenv('RUNNER_MODE','') if environment is None else environment) or 'single'
+    if not isinstance(value,str) or value.strip().lower() not in ('single','parallel'):
+        raise ValueError('Choose single or parallel runner mode')
+    return value.strip().lower()
+
+
 def main():
     stage = 'preflight'
-    print('CLIXARENA pipeline version 2026.10.20-download-progress', flush=True)
+    print('CLIXARENA pipeline version 2026.10.20-runner-selection-fix', flush=True)
     try:
         values = {name: os.getenv(name, '') for name in
                   ('VIDEO_URL', 'SUBTITLE_PATH', 'FONT_PATH', 'STREAMTAPE_LOGIN', 'STREAMTAPE_KEY','STREAMHG_API_KEY','ABYSS_API_KEY')}
@@ -962,7 +973,8 @@ def main():
             os.environ['TITLE_ANIMATION'] = 'false'
         options = settings()
         layout_cfg = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
-        runner_mode = os.getenv('RUNNER_MODE', '').strip().lower() or layout_cfg.get('runnerMode', '').strip().lower()
+        runner_mode = selected_runner_mode(layout_cfg)
+        print('Runner mode: '+('parallel (up to four encoding workers)' if runner_mode=='parallel' else 'single'),flush=True)
         if runner_mode == 'parallel':
             os.environ['DISTRIBUTED_PREPARE'] = 'true'
         else:

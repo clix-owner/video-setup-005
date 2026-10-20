@@ -1,11 +1,11 @@
-# Concurrent source artifact uploads — 2026.10.20
+# Runner selection fix - 2026.10.20
 
-Copy ALL .github/ and scripts/ contents into the existing repository, replacing matching files. Commit and push, including .github/actions/parallel-source-upload/dist-current and its three JavaScript bundle files plus licenses. Do not copy node_modules. No new secrets, npm install or portal redeploy required. New runs use the change when their source_commit includes this commit.
+Copy ALL .github/ and scripts/ contents into the existing repository and commit/push. The bundled .github/actions folder must be committed too. No portal redeploy or new secrets.
 
-In Parallel runner mode only, the prepared source chunks upload as 1–4 concurrent GitHub artifacts, retaining existing artifact names and extraction paths. All files are checked before any transfer. All requests settle and must be confirmed before worker jobs start. Compression remains 0; retention remains 1 day. Each worker still downloads only its own source chunk. File transfers to Streamtape/StreamHG/Abyss remain sequential in the user-selected order.
+Fix: the portal's overlay_layout.runnerMode selection now takes precedence over the GitHub workflow input's injected default single. Manual workflow runner_mode still works when the layout contains no runner selection. Invalid modes fail rather than silently encode on one runner. The pipeline logs the effective runner mode near startup.
 
-The official @actions/artifact 6.3.1 SDK is pinned and bundled locally for Node 24 Actions runtime, with dependency lock and licenses. No extra install step is added to workflow runs. Includes previous download-progress and upload-wait patches. Encode settings, quality checks, success-only cleanup gates and failed-run preservation are unchanged.
+This bundle includes concurrent source artifact uploads, download progress and earlier upload-wait changes. Only new runs whose source_commit includes these files use the fix. Restarting an old pinned run retains its original code. No actual workflow was triggered.
 
-Validation: 100 Python tests, 3 Node concurrency/failure tests, YAML/dependency checks; production dependency audit reports zero vulnerabilities at build time. SDK bundle loading checked locally; no authenticated artifact upload, workflow dispatch or actual host upload was performed. No measured speedup claim: shared network bandwidth, GitHub scheduling and host delays remain. Concurrent uploads can overlap transfer time; zero delay cannot be guaranteed.
+Validation: five new mode-precedence/invalid-value/workflow regression tests passed; workflow YAML parsed. Earlier cumulative validation: 100 Python tests and 3 concurrent artifact tests passed before this isolated selection fix.
 
-Rebuild (maintainers only): run npm ci --ignore-scripts, then npm run build inside .github/actions/parallel-source-upload using the locked dependencies. Commit dist-current output and licenses.
+Important: selecting parallel does not make the initial source download use multiple encoding runners. Download/prepare happen first, followed by up to four chunk workers. H.264 transfer mode can copy the video without encoding and does not need chunk workers.
