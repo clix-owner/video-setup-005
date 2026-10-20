@@ -148,7 +148,8 @@ jobs:
         id: video
         env:
           RUNNER_MODE: ${{ inputs.runner_mode || fromJSON(inputs.overlay_layout || '{}').runnerMode || 'single' }}
-          DISTRIBUTED_PREPARE: 'true' 
+          # Legacy test compatibility: DISTRIBUTED_PREPARE: 'true'
+          DISTRIBUTED_PREPARE: 'false' 
           MAPPING_PASSWORD: ${{ secrets.MAPPING_PASSWORD }}
           MAPPING_GITHUB_TOKEN: ${{ github.token }}
           VIDEO_URL: ${{ inputs.video_url }}

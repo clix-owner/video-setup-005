@@ -928,10 +928,10 @@ def main():
         options = settings()
         layout_cfg = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}')
         runner_mode = os.getenv('RUNNER_MODE', '').strip().lower() or layout_cfg.get('runnerMode', '').strip().lower()
-        if runner_mode == 'single':
-            os.environ['DISTRIBUTED_PREPARE'] = 'false'
-        elif runner_mode == 'parallel':
+        if runner_mode == 'parallel':
             os.environ['DISTRIBUTED_PREPARE'] = 'true'
+        else:
+            os.environ['DISTRIBUTED_PREPARE'] = 'false'
         if method=='soft':
             if os.getenv('DISTRIBUTED_PREPARE') == 'true':
                 options.update(watermark_enabled=False,audio='ask')
