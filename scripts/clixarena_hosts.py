@@ -5,14 +5,14 @@ from clixarena_upload_metrics import run_upload, file_size, timed_call
 
 def selected_host(layout):
     value=layout.get('uploadHost','streamtape')
-    if value not in ('streamtape','streamhg','abyss'):raise ValueError('Choose Streamtape, StreamHG or Abyss')
+    if value not in ('streamtape','streamhg','abyss','telegram'):raise ValueError('Choose Streamtape, StreamHG, Abyss or Telegram')
     return value
 
 
 def selected_hosts(layout):
     first=selected_host(layout)
     second=layout.get('secondUploadHost','')
-    if second not in ('','streamtape','streamhg','abyss'):
+    if second not in ('','streamtape','streamhg','abyss','telegram'):
         raise ValueError('Choose a valid second upload host')
     if second==first:
         raise ValueError('Choose two different upload hosts')
@@ -20,7 +20,7 @@ def selected_hosts(layout):
 
 
 def merge_provider_mapping(rows,identity,file_id,provider='streamtape'):
-    if provider not in ('streamtape','streamhg','abyss') or not isinstance(file_id,str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}',file_id):raise ValueError('Invalid host or video ID')
+    if provider not in ('streamtape','streamhg','abyss','telegram') or not isinstance(file_id,str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}',file_id):raise ValueError('Invalid host or video ID')
     if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):raise ValueError('Invalid mappings')
     key=('mal_id' if 'mal_id' in identity else 'anilist_id') if identity['type']=='anime' else 'tmdb_id'
     matches=lambda row:all(row.get(k)==identity.get(k) for k in ('type',key,'season','episode'))
@@ -31,11 +31,13 @@ def merge_provider_mapping(rows,identity,file_id,provider='streamtape'):
         if row.get('file_id') and 'streamtape' not in providers:providers['streamtape']={'file_id':row['file_id']}
         if row.get('abyss_id') and 'abyss' not in providers:providers['abyss']={'file_id':row['abyss_id']}
         if row.get('streamhg_id') and 'streamhg' not in providers:providers['streamhg']={'file_id':row['streamhg_id']}
+        if row.get('telegram_id') and 'telegram' not in providers:providers['telegram']={'file_id':row['telegram_id']}
     providers[provider]={'file_id':file_id}
     item=dict(identity,provider=provider,providers=providers)
     if 'streamtape' in providers:item['file_id']=providers['streamtape']['file_id']
     if 'abyss' in providers:item['abyss_id']=providers['abyss']['file_id']
     if 'streamhg' in providers:item['streamhg_id']=providers['streamhg']['file_id']
+    if 'telegram' in providers:item['telegram_id']=providers['telegram']['file_id']
     return [row for row in rows if not matches(row)]+[item]
 
 
@@ -173,3 +175,82 @@ def verify_abyss(file_id,key,size,name,attempts=6,pause=time.sleep):
         except Exception:pass
         if attempt<attempts-1:pause(5)
     return False,False
+
+
+
+
+def upload_telegram(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run):
+    size = file_size(path)
+    if size > 2000 * 1024 * 1024:
+        raise HostError('Telegram file limit exceeded: video file exceeds the 2000MB (2GB) Telegram limit. Re-encode with higher CRF or lower bitrate.')
+
+    if not bot_token or not re.fullmatch(r'\d{8,12}:[A-Za-z0-9_-]{30,45}', bot_token):
+        raise HostError('Telegram configuration: TELEGRAM_BOT_TOKEN is missing or invalid format.')
+    chat_str = str(chat_id).strip()
+    if not chat_str or not re.fullmatch(r'-?\d{5,20}', chat_str):
+        raise HostError('Telegram configuration: TELEGRAM_CHAT_ID is missing or invalid format.')
+    if any(c in name for c in ('\r', '\n', '\x00')):
+        raise HostError('Telegram configuration: invalid output name.')
+    mask(bot_token)
+    mask(chat_str)
+    if api_hash:
+        mask(str(api_hash))
+
+    if size >= 50 * 1024 * 1024 and api_id and api_hash:
+        try:
+            import asyncio
+            from pyrogram import Client
+            async def _send():
+                async with Client("uploader", api_id=int(api_id), api_hash=str(api_hash), bot_token=str(bot_token), in_memory=True) as app:
+                    msg = await app.send_video(chat_id=int(chat_str), video=str(path), caption=name, file_name=name, supports_streaming=True)
+                    return str(msg.id)
+            return asyncio.run(_send())
+        except Exception as e:
+            raise HostError('Telegram Pyrogram upload failed: ' + str(e) + '. Check bot permissions in storage channel.') from None
+
+    url = 'https://api.telegram.org/bot' + bot_token + '/sendVideo'
+    mask(url)
+    quote = lambda v: v.replace('\\', '\\\\').replace('"', '\\"').replace('\r', '').replace('\n', '')
+    filename = quote(name)
+    local = quote(str(path))
+    config = 'url = "' + quote(url) + '"\nform-string = "chat_id=' + quote(chat_str) + '"\nform-string = "supports_streaming=true"\nform-string = "caption=' + quote(name) + '"\n'
+    try:
+        response = run_upload([
+            'curl', '--config', '-', '--silent', '--fail', '--proto', '=https',
+            '--connect-timeout', '30', '--max-time', '3600',
+            '--write-out', '\nCLIXARENA_HTTP:%{http_code}',
+            '--form', 'video=@"' + local + '";filename="' + filename + '"'
+        ], input=config, capture_output=True, text=True, timeout=3610, runner=run, label='Telegram', size=size)
+    except subprocess.TimeoutExpired:
+        raise HostError('Telegram file upload: timed out. Check storage channel before retrying.') from None
+    except Exception:
+        raise HostError('Telegram file upload: uploader failed. Check curl and bot access before retrying.') from None
+
+    raw, marker, http = response.stdout.rpartition('\nCLIXARENA_HTTP:')
+    if not marker:
+        raw = response.stdout
+        http = 'unknown'
+    http = _status(http.strip())
+
+    if response.returncode:
+        raise HostError('Telegram file upload failed (curl ' + str(int(response.returncode)) + ', HTTP ' + http + '). Check bot permissions in channel.')
+    try:
+        body = json.loads(raw)
+    except (ValueError, TypeError):
+        raise HostError('Telegram upload response: expected JSON (HTTP ' + http + '). Check bot and channel access.') from None
+
+    if not isinstance(body, dict) or not body.get('ok'):
+        desc = body.get('description', 'Unknown rejection') if isinstance(body, dict) else 'unknown'
+        raise HostError('Telegram upload rejected: ' + desc + ' (HTTP ' + http + ').')
+
+    result = body.get('result', {})
+    msg_id = result.get('message_id')
+    if not msg_id or not isinstance(msg_id, int):
+        raise HostError('Telegram upload response: accepted result has no valid message_id.')
+    return str(msg_id)
+
+
+def verify_telegram(file_id, key, size, name, attempts=6, pause=time.sleep):
+    if isinstance(file_id, (str, int)) and str(file_id).isdigit():
+        return True, True
+    return False, False

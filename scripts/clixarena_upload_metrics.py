@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 
-_LABELS={'Streamtape','StreamHG','Abyss'}
+_LABELS={'Streamtape','StreamHG','Abyss','Telegram'}
 _STATS='\nCLIXARENA_UPLOAD_STATS:'
 
 
