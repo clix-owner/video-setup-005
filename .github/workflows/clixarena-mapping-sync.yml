@@ -1,7 +1,7 @@
 name: CLIXARENA mapping sync
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '7,37 * * * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -18,10 +18,12 @@ jobs:
           persist-credentials: false
       - name: Install encryption dependency
         run: sudo apt-get update -qq && sudo apt-get install -y python3-cryptography
-      - name: Remove only confirmed deleted video mappings
+      - name: Sync Streamtape, StreamHG and Abyss mappings safely
         env:
           MAPPING_PASSWORD: ${{ secrets.MAPPING_PASSWORD }}
           MAPPING_GITHUB_TOKEN: ${{ github.token }}
           STREAMTAPE_LOGIN: ${{ secrets.STREAMTAPE_LOGIN }}
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
+          STREAMHG_API_KEY: ${{ secrets.STREAMHG_API_KEY }}
+          ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
         run: python3 scripts/clixarena_mapping_sync.py
