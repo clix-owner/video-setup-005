@@ -39,6 +39,9 @@ jobs:
           STREAMTAPE_KEY: ${{ secrets.STREAMTAPE_KEY }}
           STREAMHG_API_KEY: ${{ secrets.STREAMHG_API_KEY }}
           ABYSS_API_KEY: ${{ secrets.ABYSS_API_KEY }}
+          ABYSS_EMAIL: ${{ secrets.ABYSS_EMAIL }}
+          ABYSS_PASSWORD: ${{ secrets.ABYSS_PASSWORD }}
+          ABYSS_AUTH_TOKEN: ${{ secrets.ABYSS_AUTH_TOKEN }}
         run: python3 scripts/clixarena_mapping_sync.py
       - name: Restore only StreamHG references removed by the selected sync commit
         if: github.event_name == 'workflow_dispatch' && inputs.operation == 'restore_streamhg'

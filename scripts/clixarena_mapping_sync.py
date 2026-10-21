@@ -81,20 +81,46 @@ def streamhg_missing(ids,body):
             and row.get('file_code') in ids and type(row.get('status')) is int and row['status']==404}
 
 
-def read_json(url,allow_404=False):
+def read_json(url,allow_404=False,headers=None,payload=None,stage='Provider read-only request'):
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
-    req=urllib.request.Request(url,headers={'Accept':'application/json'})
+    request_headers={'Accept':'application/json','User-Agent':'CLIXARENA-mapping-sync/2026.10.21'}
+    request_headers.update(headers or {})
+    if payload is not None:request_headers['Content-Type']='application/json'
+    req=urllib.request.Request(url,headers=request_headers,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        method='POST' if payload is not None else 'GET')
     try:
         response=opener.open(req,timeout=30)
     except urllib.error.HTTPError as error:
         if not allow_404 or error.code!=404:
-            raise SyncError('Provider read-only request: HTTP '+str(error.code)) from None
+            challenge='; provider challenge detected' if error.headers and error.headers.get('cf-mitigated')=='challenge' else ''
+            raise SyncError(stage+': HTTP '+str(error.code)+challenge) from None
         response=error
     with response:
         status=response.code
         data=response.read(1024*1024+1)
         if len(data)>1024*1024:raise ValueError('Oversized provider response')
         return status,json.loads(data)
+
+
+def abyss_auth():
+    """Use documented login/Bearer auth when configured; never treat API keys as JWTs."""
+    email,password=os.getenv('ABYSS_EMAIL',''),os.getenv('ABYSS_PASSWORD','')
+    token=os.getenv('ABYSS_AUTH_TOKEN','')
+    if email or password:
+        if not email or not password:raise SyncError('Abyss login requires both ABYSS_EMAIL and ABYSS_PASSWORD')
+        status,body=read_json('https://api.abyss.to/auth/login',payload={'email':email,'password':password},stage='Abyss login')
+        if status not in (200,201) or not isinstance(body,dict):raise SyncError('Abyss login response could not be verified')
+        token=body.get('token','')
+        if not token:raise SyncError('Abyss login returned no token')
+    if token:
+        if not isinstance(token,str) or len(token)>16384 or any(ord(c)<33 or ord(c)>126 for c in token):
+            raise SyncError('Abyss authentication token format is invalid')
+        mask(token)
+        return '',{'Authorization':'Bearer '+token}
+    key=os.getenv('ABYSS_API_KEY','')
+    if not key:raise SyncError('Abyss API key or login credentials are not configured')
+    return '?key='+urllib.parse.quote(key,safe=''),{}
 
 
 def abyss_account_verified(body):
@@ -152,18 +178,16 @@ def collect_missing(rows,pause=time.sleep):
                     if candidates-deleted:
                         raise SyncError('StreamHG file-info missing results were not confirmed by account deleted-files history')
             else:
-                key=os.environ['ABYSS_API_KEY']
-                if not key:raise ValueError()
-                query='?key='+urllib.parse.quote(key,safe='')
-                status,body=read_json('https://api.abyss.to/v1/about'+query)
+                query,headers=abyss_auth()
+                status,body=read_json('https://api.abyss.to/v1/about'+query,headers=headers,stage='Abyss quota lookup')
                 if status!=200 or not abyss_account_verified(body):
                     raise SyncError('Abyss quota API response format could not be verified (HTTP '+str(status)+')')
                 for fid in ids[host]:
                     url='https://api.abyss.to/v1/files/'+fid+query
-                    status,body=read_json(url,True)
+                    status,body=read_json(url,True,headers=headers,stage='Abyss file lookup')
                     if abyss_file_missing(fid,status,body):
                         pause(5)
-                        status,body=read_json(url,True)
+                        status,body=read_json(url,True,headers=headers,stage='Abyss repeated file lookup')
                         if abyss_file_missing(fid,status,body):missing[host].add(fid)
                         elif status!=200 or not isinstance(body,dict) or body.get('id')!=fid:
                             raise SyncError('Abyss repeated file lookup could not be verified (HTTP '+str(status)+')')
@@ -184,7 +208,7 @@ def main():
     try:
         repo=os.environ['GITHUB_REPOSITORY'];ref=os.environ['GITHUB_REF_NAME'];token=os.environ['MAPPING_GITHUB_TOKEN']
         if not token or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo):raise ValueError()
-        for value in (token,os.getenv('STREAMTAPE_LOGIN'),os.getenv('STREAMTAPE_KEY'),os.getenv('STREAMHG_API_KEY'),os.getenv('ABYSS_API_KEY')):
+        for value in (token,os.getenv('STREAMTAPE_LOGIN'),os.getenv('STREAMTAPE_KEY'),os.getenv('STREAMHG_API_KEY'),os.getenv('ABYSS_API_KEY'),os.getenv('ABYSS_AUTH_TOKEN'),os.getenv('ABYSS_EMAIL'),os.getenv('ABYSS_PASSWORD')):
             if value:mask(value)
         endpoint='https://api.github.com/repos/'+repo+'/contents/mappings.json'
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())

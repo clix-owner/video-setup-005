@@ -48,7 +48,7 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(sync.abyss_account_verified(QUOTA))
 
     def test_all_providers_confirm_twice(self):
-        def read(url,allow_404=False):
+        def read(url,allow_404=False,**kwargs):
             return (200,QUOTA) if '/about' in url else (404,{'message':'File not found','id':'abyss1'})
         with patch.dict(os.environ,{'STREAMTAPE_LOGIN':'login','STREAMTAPE_KEY':'key','STREAMHG_API_KEY':'key','ABYSS_API_KEY':'key'}), \
              patch.object(sync,'api',return_value={'tape1':{'status':404}}) as tape, \

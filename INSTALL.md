@@ -20,3 +20,19 @@ Existing secrets: MAPPING_PASSWORD, STREAMTAPE_LOGIN, STREAMTAPE_KEY, STREAMHG_A
 17 mocked tests passed, including all-missing safety, account history cross-check, no writes on any host failure, recovery after concurrent/new uploads and repeated recovery. No live account sync, restoration or workflow run was triggered here.
 
 Update the files in the existing video-setup repository and push. No Hugging Face or control UI changes and no new secrets are required. Keep the existing ABYSS_API_KEY. This includes the prior safety/recovery workflow. For the quota correction itself the only changed runtime file relative to the previous safety ZIP is scripts/clixarena_mapping_sync.py.
+
+
+## Abyss HTTP 403 and Bearer authentication update
+
+The earlier run only proved HTTP 403, not whether it was credentials, account policy or provider/network protection. This version reports the exact fixed stage (Abyss login, quota lookup, file lookup) plus numeric status. It does not claim to bypass a provider block.
+
+To use documented automatic login/Bearer auth, add these GitHub Actions secrets on video-setup:
+- ABYSS_EMAIL: Abyss account login email.
+- ABYSS_PASSWORD: Abyss account login password, NOT MAPPING_PASSWORD.
+Keep ABYSS_API_KEY because upload still uses that key. Both login fields must be configured together.
+
+Each sync run logs in once through POST https://api.abyss.to/auth/login with the documented email/password JSON, masks the returned token, and sends it in Authorization: Bearer for quota/file checks. No account/file modifications are performed. If login fails there is no mapping write.
+
+Alternative: ABYSS_AUTH_TOKEN can be a current login Bearer token; it can expire and is not required when email/password are supplied. Priority is automatic login, then explicit Bearer token, then existing API-key query mode. An API key is never guessed to be a Bearer token. There is no repeated login/fallback on a 403.
+
+Copy the updated workflow and scripts to the existing repository, commit/push, then manually run operation=sync if desired. No workflow was triggered here. If the provider also rejects the authenticated request, mappings remain unchanged and the new stage warning identifies the rejection. 21 mocked tests passed; real account access remains untested.

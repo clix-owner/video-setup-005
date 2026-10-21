@@ -7,7 +7,7 @@ from test_mapping_sync_all import QUOTA
 class AbyssQuotaTests(unittest.TestCase):
     def test_documented_quota_and_matching_file_succeed_with_query_api_key(self):
         calls=[]
-        def read(url,allow_404=False):
+        def read(url,allow_404=False,**kwargs):
             calls.append(url)
             return (200,QUOTA) if '/about?' in url else (200,{'id':'A-b_c','name':'Video'})
         with patch.dict(os.environ,{'ABYSS_API_KEY':'test&+key'}),patch.object(sync,'read_json',side_effect=read):
