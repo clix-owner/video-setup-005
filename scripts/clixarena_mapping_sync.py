@@ -24,6 +24,22 @@ def streamtape_id(row):
 HOSTS={'streamtape':'file_id','abyss':'abyss_id','streamhg':'streamhg_id'}
 
 
+class SyncError(ValueError):
+    """Only fixed stage labels and numeric statuses belong in these messages."""
+
+
+def bulk_guard(total,missing):
+    if len(missing)>=5 and len(missing)/total>=0.25:
+        raise SyncError('Bulk missing-file guard: unusually many references were reported missing')
+
+
+def streamhg_deleted(body):
+    if not isinstance(body,dict) or str(body.get('status'))!='200' or not isinstance(body.get('result'),list):
+        raise SyncError('StreamHG deleted-files response could not be verified')
+    return {r['file_code'] for r in body['result'] if isinstance(r,dict)
+            and isinstance(r.get('file_code'),str) and r.get('deleted') and r.get('deleted_by')}
+
+
 def host_ids(row):
     providers=row.get('providers',{})
     if not isinstance(providers,dict):raise ValueError('Invalid providers')
@@ -71,7 +87,8 @@ def read_json(url,allow_404=False):
     try:
         response=opener.open(req,timeout=30)
     except urllib.error.HTTPError as error:
-        if not allow_404 or error.code!=404:raise
+        if not allow_404 or error.code!=404:
+            raise SyncError('Provider read-only request: HTTP '+str(error.code)) from None
         response=error
     with response:
         status=response.code
@@ -82,9 +99,14 @@ def read_json(url,allow_404=False):
 
 def abyss_account_verified(body):
     if not isinstance(body,dict):return False
-    candidates=[body]+[body.get(k) for k in ('user','account','data')]
-    return any(isinstance(x,dict) and x.get('id') and isinstance(x.get('email'),str)
-               and '@' in x['email'] for x in candidates)
+    # /v1/about returns quota information, not an account profile.
+    fields={'storageQuota':('limit','actual','usage'),
+            'uploadQuota':('dailyUploadQuota','dailyUploadUsed','dailyUploadRemaining')}
+    for group,names in fields.items():
+        values=body.get(group)
+        if not isinstance(values,dict) or any(type(values.get(name)) is not int or values[name]<0 for name in names):
+            return False
+    return type(body.get('maxUploadSize')) is int and body['maxUploadSize']>=0
 
 
 def abyss_file_missing(fid,status,body):
@@ -92,7 +114,7 @@ def abyss_file_missing(fid,status,body):
     if status!=404 or not isinstance(body,dict):return False
     message=body.get('message',body.get('error',''))
     return isinstance(message,str) and message.strip().lower().rstrip('.') in (
-        'file not found','video not found','file does not exist','video does not exist') and body.get('id',fid)==fid
+        'file not found','video not found','file does not exist','video does not exist') and body.get('id')==fid
 
 
 def collect_missing(rows,pause=time.sleep):
@@ -111,18 +133,31 @@ def collect_missing(rows,pause=time.sleep):
                 from clixarena_hosts import streamhg_api
                 key=os.environ['STREAMHG_API_KEY']
                 if not key:raise ValueError()
+                account=streamhg_api('account/info',key)
+                if not isinstance(account.get('result'),dict) or not account['result'].get('login'):
+                    raise SyncError('StreamHG account identity could not be verified')
+                candidates=set()
                 for offset in range(0,len(ids[host]),100):
                     batch=ids[host][offset:offset+100]
                     first=streamhg_missing(batch,streamhg_api('file/info',key,{'file_code':','.join(batch)}))
                     if first:
                         pause(5)
-                        missing[host].update(first & streamhg_missing(first,streamhg_api('file/info',key,{'file_code':','.join(sorted(first))})))
+                        candidates.update(first & streamhg_missing(first,streamhg_api('file/info',key,{'file_code':','.join(sorted(first))})))
+                if candidates:
+                    bulk_guard(len(ids[host]),candidates)
+                    deleted=streamhg_deleted(streamhg_api('file/deleted',key,{'last':168}))
+                    pause(5)
+                    deleted &= streamhg_deleted(streamhg_api('file/deleted',key,{'last':168}))
+                    missing[host]=candidates & deleted
+                    if candidates-deleted:
+                        raise SyncError('StreamHG file-info missing results were not confirmed by account deleted-files history')
             else:
                 key=os.environ['ABYSS_API_KEY']
                 if not key:raise ValueError()
                 query='?key='+urllib.parse.quote(key,safe='')
                 status,body=read_json('https://api.abyss.to/v1/about'+query)
-                if status!=200 or not abyss_account_verified(body):raise ValueError('Abyss account not verified')
+                if status!=200 or not abyss_account_verified(body):
+                    raise SyncError('Abyss quota API response format could not be verified (HTTP '+str(status)+')')
                 for fid in ids[host]:
                     url='https://api.abyss.to/v1/files/'+fid+query
                     status,body=read_json(url,True)
@@ -130,11 +165,18 @@ def collect_missing(rows,pause=time.sleep):
                         pause(5)
                         status,body=read_json(url,True)
                         if abyss_file_missing(fid,status,body):missing[host].add(fid)
-                    elif status!=200:raise ValueError('Unconfirmed Abyss status')
+                        elif status!=200 or not isinstance(body,dict) or body.get('id')!=fid:
+                            raise SyncError('Abyss repeated file lookup could not be verified (HTTP '+str(status)+')')
+                    elif status!=200:
+                        raise SyncError('Abyss file lookup could not confirm a file-specific deletion (HTTP '+str(status)+')')
+                    elif not isinstance(body,dict) or body.get('id')!=fid:
+                        raise SyncError('Abyss file lookup returned an unverified file identity (HTTP 200)')
+            bulk_guard(len(ids[host]),missing[host])
             print(host+' checked: '+str(len(ids[host]))+' file(s); confirmed missing: '+str(len(missing[host]))+'. No IDs or URLs logged.')
-        except Exception:
+        except Exception as error:
             missing[host]=set();failed.append(host)
             print('::warning::'+host+' sync unavailable or unconfirmed. All mappings for this host were preserved. Check credentials/API availability. Private details suppressed.')
+            if isinstance(error,SyncError):print('::warning::'+str(error)+'. No changes for this host.')
     return missing,failed
 
 
@@ -158,6 +200,9 @@ def main():
                 raise
             rows=decrypt_mappings(json.loads(base64.b64decode(current['content'])))
             missing,failed=collect_missing(rows)
+            if failed:
+                print('::error::Sync incomplete. No mapping changes were saved for any host.')
+                return 1
             updated=prune(rows,missing)
             if updated==rows:print('Mapping sync: no changes.');return 1 if failed else 0
             content=json.dumps(encrypt_mappings(updated),indent=2)+'\n'

@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import patch
 import clixarena_mapping_sync as sync
 
+QUOTA={'storageQuota':{'limit':1125899906842624,'actual':1099511627776,'usage':0},'uploadQuota':{'dailyUploadQuota':107374182400,'dailyUploadUsed':0,'dailyUploadRemaining':107374182400},'maxUploadSize':10737418240,'perms':{'reconvert':False}}
+
 ROWS=[{'type':'movie','tmdb_id':1,'name':'Keep name','subtitle_url':'https://example.com/a.srt',
        'file_id':'tape1','abyss_id':'abyss1','streamhg_id':'hg1','provider':'streamhg',
        'providers':{'streamtape':{'file_id':'tape1'},'abyss':{'file_id':'abyss1'},'streamhg':{'file_id':'hg1'}}}]
@@ -39,21 +41,23 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(sync.abyss_file_missing('a',404,{'message':'Not Found'}))
         self.assertFalse(sync.abyss_file_missing('a',401,{'message':'File not found'}))
         self.assertFalse(sync.abyss_file_missing('a',404,{'message':'File not found','id':'other'}))
-        self.assertTrue(sync.abyss_file_missing('a',404,{'message':'File not found'}))
+        self.assertFalse(sync.abyss_file_missing('a',404,{'message':'File not found'}))
+        self.assertTrue(sync.abyss_file_missing('a',404,{'message':'File not found','id':'a'}))
         self.assertFalse(sync.abyss_account_verified({'status':200}))
-        self.assertTrue(sync.abyss_account_verified({'user':{'id':'user','email':'test@example.com'}}))
+        self.assertFalse(sync.abyss_account_verified({'user':{'id':'user','email':'test@example.com'}}))
+        self.assertTrue(sync.abyss_account_verified(QUOTA))
 
     def test_all_providers_confirm_twice(self):
         def read(url,allow_404=False):
-            return (200,{'id':'u','email':'u@example.com'}) if '/about' in url else (404,{'message':'File not found'})
+            return (200,QUOTA) if '/about' in url else (404,{'message':'File not found','id':'abyss1'})
         with patch.dict(os.environ,{'STREAMTAPE_LOGIN':'login','STREAMTAPE_KEY':'key','STREAMHG_API_KEY':'key','ABYSS_API_KEY':'key'}), \
              patch.object(sync,'api',return_value={'tape1':{'status':404}}) as tape, \
-             patch('clixarena_hosts.streamhg_api',return_value={'status':200,'result':[{'file_code':'hg1','status':404}]}) as hg, \
+             patch('clixarena_hosts.streamhg_api',side_effect=lambda route,*args: {'status':200,'result':{'login':'user'}} if route=='account/info' else {'status':200,'result':[{'file_code':'hg1','status':404}]} if route=='file/info' else {'status':200,'result':[{'file_code':'hg1','deleted':'2026-10-21','deleted_by':'me'}]}) as hg, \
              patch.object(sync,'read_json',side_effect=read) as abyss:
             missing,failed=sync.collect_missing(ROWS,pause=lambda _:None)
         self.assertEqual(failed,[])
         self.assertEqual(missing,{'streamtape':{'tape1'},'abyss':{'abyss1'},'streamhg':{'hg1'}})
-        self.assertEqual((tape.call_count,hg.call_count,abyss.call_count),(2,2,3))
+        self.assertEqual((tape.call_count,hg.call_count,abyss.call_count),(2,5,3))
 
     def test_auth_failure_preserves_host_while_other_hosts_sync(self):
         with patch.dict(os.environ,{'STREAMTAPE_LOGIN':'login','STREAMTAPE_KEY':'key','STREAMHG_API_KEY':'key','ABYSS_API_KEY':'key'}), \
