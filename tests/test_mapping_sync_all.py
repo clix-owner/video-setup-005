@@ -38,10 +38,11 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(ValueError):sync.streamhg_missing(['a'],{'status':403})
 
     def test_abyss_generic_404_and_auth_errors_never_delete(self):
-        self.assertFalse(sync.abyss_file_missing('a',404,{'message':'Not Found'}))
+        self.assertFalse(sync.abyss_file_missing('a',404,{'message':'Internal error'}))
         self.assertFalse(sync.abyss_file_missing('a',401,{'message':'File not found'}))
         self.assertFalse(sync.abyss_file_missing('a',404,{'message':'File not found','id':'other'}))
-        self.assertFalse(sync.abyss_file_missing('a',404,{'message':'File not found'}))
+        self.assertTrue(sync.abyss_file_missing('a',404,{'message':'File not found'}))
+        self.assertTrue(sync.abyss_file_missing('a',404,{'message':'Not Found'}))
         self.assertTrue(sync.abyss_file_missing('a',404,{'message':'File not found','id':'a'}))
         self.assertFalse(sync.abyss_account_verified({'status':200}))
         self.assertFalse(sync.abyss_account_verified({'user':{'id':'user','email':'test@example.com'}}))

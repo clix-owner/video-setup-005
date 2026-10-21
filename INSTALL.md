@@ -36,3 +36,13 @@ Each sync run logs in once through POST https://api.abyss.to/auth/login with the
 Alternative: ABYSS_AUTH_TOKEN can be a current login Bearer token; it can expire and is not required when email/password are supplied. Priority is automatic login, then explicit Bearer token, then existing API-key query mode. An API key is never guessed to be a Bearer token. There is no repeated login/fallback on a 403.
 
 Copy the updated workflow and scripts to the existing repository, commit/push, then manually run operation=sync if desired. No workflow was triggered here. If the provider also rejects the authenticated request, mappings remain unchanged and the new stage warning identifies the rejection. 21 mocked tests passed; real account access remains untested.
+
+## Abyss HTTP 404 deletion confirmation fix
+
+Previously, abyss_file_missing required body.get('id') == fid in order to recognize a 404 response as a deletion. Because Abyss's standard REST API returns {"message": "File not found"} or {"message": "Not Found"} without echoing back the file ID, missing files triggered an unconfirmed deletion warning and halted the mapping sync workflow with exit code 1.
+
+This update adapts the check:
+- Accepts standard missing messages ('file not found', 'video not found', 'file does not exist', 'video does not exist', 'not found').
+- Permits body.get('id') to be omitted (None) or matching the requested file ID.
+- Mismatched IDs or unexpected error formats continue to be treated as unverified.
+- Twice-confirmed missing Abyss files are now cleanly pruned from mappings.json while preserving active files and other hosts.

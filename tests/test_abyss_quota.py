@@ -32,7 +32,7 @@ class AbyssQuotaTests(unittest.TestCase):
         self.assertEqual(failed,['abyss']);self.assertFalse(missing['abyss'])
 
     def test_unidentified_404_is_preserved(self):
-        with patch.dict(os.environ,{'ABYSS_API_KEY':'test'}),patch.object(sync,'read_json',side_effect=[(200,QUOTA),(404,{'message':'File not found'})]):
+        with patch.dict(os.environ,{'ABYSS_API_KEY':'test'}),patch.object(sync,'read_json',side_effect=[(200,QUOTA),(404,{'message':'Unknown provider error'})]):
             missing,failed=sync.collect_missing([{'abyss_id':'id'}],lambda _:None)
         self.assertEqual(failed,['abyss']);self.assertFalse(missing['abyss'])
 

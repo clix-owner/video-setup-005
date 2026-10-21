@@ -139,8 +139,9 @@ def abyss_file_missing(fid,status,body):
     # A generic HTTP 404 (e.g. wrong route/protection page) is never deletion evidence.
     if status!=404 or not isinstance(body,dict):return False
     message=body.get('message',body.get('error',''))
-    return isinstance(message,str) and message.strip().lower().rstrip('.') in (
-        'file not found','video not found','file does not exist','video does not exist') and body.get('id')==fid
+    if not isinstance(message,str):return False
+    msg=message.strip().lower().rstrip('.')
+    return msg in ('file not found','video not found','file does not exist','video does not exist','not found') and body.get('id') in (fid,None)
 
 
 def collect_missing(rows,pause=time.sleep):
