@@ -206,10 +206,31 @@ def get_media_duration(path, run=subprocess.run):
 
 def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, mask, run):
     size = file_size(path)
+    # Channel ID normalization for Telegram supergroups/channels
+    chat_str = str(chat_str).strip()
+    if chat_str.startswith('-') and not chat_str.startswith('-100'):
+        chat_str = f'-100{chat_str.lstrip("-")}'
+    elif not chat_str.startswith('-') and len(chat_str) >= 9:
+        chat_str = f'-100{chat_str}'
+
     if size >= 50 * 1024 * 1024 and api_id and api_hash:
         try:
             import asyncio
-            from pyrogram import Client
+            from pyrogram import Client, utils
+
+            # Monkey-patch Pyrogram MIN_CHANNEL_ID bug for modern 64-bit Telegram channels (-1002...)
+            utils.MIN_CHANNEL_ID = -1009999999999
+            utils.MIN_CHAT_ID = -999999999999
+            def _patch_peer_type(peer_id: int) -> str:
+                s = str(peer_id)
+                if not s.startswith('-'):
+                    return 'user'
+                elif s.startswith('-100'):
+                    return 'channel'
+                else:
+                    return 'chat'
+            utils.get_peer_type = _patch_peer_type
+
             async def _send():
                 async with Client("uploader", api_id=int(api_id), api_hash=str(api_hash), bot_token=str(bot_token), in_memory=True) as app:
                     msg = await app.send_video(chat_id=int(chat_str), video=str(path), caption=name, file_name=name, supports_streaming=True)
