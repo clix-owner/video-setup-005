@@ -208,9 +208,13 @@ def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, m
     size = file_size(path)
     # Channel ID normalization for Telegram supergroups/channels
     chat_str = str(chat_str).strip()
-    if chat_str.startswith('-') and not chat_str.startswith('-100'):
+    if chat_str.startswith('-100'):
+        pass
+    elif chat_str.startswith('-'):
         chat_str = f'-100{chat_str.lstrip("-")}'
-    elif not chat_str.startswith('-') and len(chat_str) >= 9:
+    elif chat_str.startswith('100'):
+        chat_str = f'-{chat_str}'
+    else:
         chat_str = f'-100{chat_str}'
 
     if size >= 50 * 1024 * 1024 and api_id and api_hash:
@@ -232,7 +236,7 @@ def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, m
             utils.get_peer_type = _patch_peer_type
 
             async def _send():
-                async with Client("uploader", api_id=int(api_id), api_hash=str(api_hash), bot_token=str(bot_token), in_memory=True) as app:
+                async with Client("uploader", api_id=int(api_id), api_hash=str(api_hash), bot_token=str(bot_token), in_memory=True, workers=8) as app:
                     msg = await app.send_video(chat_id=int(chat_str), video=str(path), caption=name, file_name=name, supports_streaming=True)
                     return str(msg.id)
             return asyncio.run(_send())
@@ -359,7 +363,7 @@ def transcode_resolution(input_path, output_path, target_height, run=subprocess.
     crf = "22" if target_height >= 720 else "23"
     cmd = [
         'ffmpeg', '-y', '-i', str(input_path),
-        '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', crf,
+        '-vf', vf, '-c:v', 'libx264', '-preset', 'superfast', '-crf', crf, '-sws_flags', 'fast_bilinear',
         '-c:a', 'copy', '-movflags', '+faststart', str(output_path)
     ]
     res = run(cmd, capture_output=True)
@@ -367,10 +371,17 @@ def transcode_resolution(input_path, output_path, target_height, run=subprocess.
         raise HostError(f"Transcoding to {target_height}p failed.")
 
 
-def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run):
+def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run, mode='multi'):
     w, h = get_video_dimensions(path, run=run)
     base_name = name.removesuffix('.mp4')
     quality_ids = {}
+
+    if mode == 'single':
+        q_name = '1080p' if h >= 900 else ('720p' if h >= 600 else '480p')
+        print(f"Uploading single quality ({q_name}) video to Telegram...", flush=True)
+        res_id = upload_telegram(path, name, bot_token, chat_id, api_id, api_hash, mask, run=run)
+        quality_ids[q_name] = res_id
+        return res_id, quality_ids
 
     import tempfile
     from pathlib import Path

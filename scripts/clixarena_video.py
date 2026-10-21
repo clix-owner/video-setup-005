@@ -917,7 +917,9 @@ def complete_upload_one(path, output_name, values, provider):
             chat_id=values.get('TELEGRAM_CHAT_ID') or os.getenv('TELEGRAM_CHAT_ID','')
             api_id=values.get('TELEGRAM_API_ID') or os.getenv('TELEGRAM_API_ID','')
             api_hash=values.get('TELEGRAM_API_HASH') or os.getenv('TELEGRAM_API_HASH','')
-            file_id, quality_ids = upload_telegram_multi(path,output_name,bot_token,chat_id,api_id,api_hash,mask)
+            layout_cfg = json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}')
+            telegram_mode = layout_cfg.get('telegramMode', 'multi')
+            file_id, quality_ids = upload_telegram_multi(path,output_name,bot_token,chat_id,api_id,api_hash,mask,mode=telegram_mode)
         except HostError as error:raise DownloadError(str(error)) from None
         except Exception as e:raise DownloadError('Telegram upload failed: ' + str(e)) from None
         print('Telegram upload accepted: ' + file_id,flush=True)
