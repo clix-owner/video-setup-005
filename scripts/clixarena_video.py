@@ -28,7 +28,7 @@ from clixarena_features import (settings, subtitle_asset, audio_selection, fetch
                                 write_intro, video_dimensions, fitted_dimensions, filter_graph, encode_progress, logo_dimensions)
 from clixarena_torrent import TorrentError, download_torrent
 from clixarena_parallel import parallel_download
-from clixarena_hosts import HostError,selected_host,selected_hosts,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss,upload_telegram,verify_telegram
+from clixarena_hosts import HostError,selected_host,selected_hosts,merge_provider_mapping,upload_streamhg,verify_streamhg,upload_abyss,verify_abyss,upload_telegram,verify_telegram,upload_telegram_multi
 
 def download_source(url,target,limit,root):
     descriptor=json.loads(os.getenv('OVERLAY_LAYOUT','') or '{}').get('torrent')
@@ -742,8 +742,8 @@ def external_subtitle_mapping(root=None):
     return {'subtitle_url': url, 'subtitle_language': asset['language'], 'subtitle_format': 'srt'}
 
 
-def merge_mapping(rows, identity, file_id, provider='streamtape'):
-    return merge_provider_mapping(rows,identity,file_id,provider)
+def merge_mapping(rows, identity, file_id, provider='streamtape', quality_ids=None):
+    return merge_provider_mapping(rows,identity,file_id,provider,quality_ids=quality_ids)
 
 
 def mapping_password():
@@ -781,7 +781,7 @@ def decrypt_mappings(document):
     return rows
 
 
-def save_mapping(file_id,provider='streamtape'):
+def save_mapping(file_id,provider='streamtape',quality_ids=None):
     identity = json.loads(os.getenv('OVERLAY_LAYOUT', '') or '{}').get('mapping')
     if identity is None:
         return
@@ -798,7 +798,7 @@ def save_mapping(file_id,provider='streamtape'):
     identity = dict(identity, **external_subtitle_mapping())
     backup = Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'mapping-result.json'
     receipt_rows=decrypt_mappings(json.loads(backup.read_text(encoding='utf-8'))) if backup.is_file() else []
-    backup.write_text(json.dumps(encrypt_mappings(merge_mapping(receipt_rows,identity,file_id,provider)), indent=2) + '\n', encoding='utf-8')
+    backup.write_text(json.dumps(encrypt_mappings(merge_mapping(receipt_rows,identity,file_id,provider,quality_ids=quality_ids)), indent=2) + '\n', encoding='utf-8')
     repo = os.getenv('GITHUB_REPOSITORY', '')
     token = os.getenv('MAPPING_GITHUB_TOKEN', '')
     ref = os.getenv('GITHUB_REF_NAME', '')
@@ -820,7 +820,7 @@ def save_mapping(file_id,provider='streamtape'):
                 if error.code != 404:
                     raise
                 current, rows = None, []
-            merged = merge_mapping(rows, identity, file_id,provider)
+            merged = merge_mapping(rows, identity, file_id,provider,quality_ids=quality_ids)
             content = json.dumps(encrypt_mappings(merged), indent=2) + '\n'
             backup.write_text(content, encoding='utf-8')
             if rows == merged and current and not isinstance(document, list):
@@ -911,18 +911,18 @@ def complete_upload_one(path, output_name, values, provider):
         return
 
     if provider=='telegram':
-        print('Uploading video to Telegram',flush=True)
+        print('Uploading video to Telegram (with auto multi-resolution transcoding)',flush=True)
         try:
             bot_token=values.get('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN','')
             chat_id=values.get('TELEGRAM_CHAT_ID') or os.getenv('TELEGRAM_CHAT_ID','')
             api_id=values.get('TELEGRAM_API_ID') or os.getenv('TELEGRAM_API_ID','')
             api_hash=values.get('TELEGRAM_API_HASH') or os.getenv('TELEGRAM_API_HASH','')
-            file_id=upload_telegram(path,output_name,bot_token,chat_id,api_id,api_hash,mask)
+            file_id, quality_ids = upload_telegram_multi(path,output_name,bot_token,chat_id,api_id,api_hash,mask)
         except HostError as error:raise DownloadError(str(error)) from None
-        except Exception:raise DownloadError('Telegram upload failed or response was not verified. Check Telegram bot permissions before uploading again; no automatic retry.') from None
-        print('Telegram upload accepted',flush=True)
+        except Exception as e:raise DownloadError('Telegram upload failed: ' + str(e)) from None
+        print('Telegram upload accepted: ' + file_id,flush=True)
         mapping_saved=True
-        try:timed_call('Telegram mapping save',save_mapping,file_id,'telegram')
+        try:timed_call('Telegram mapping save',save_mapping,file_id,'telegram',quality_ids)
         except Exception:
             mapping_saved=False
             print('::warning::Telegram upload accepted, but mapping save failed. Download the encrypted mapping-result.json artifact; do not upload again.',flush=True)

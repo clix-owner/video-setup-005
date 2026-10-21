@@ -12,14 +12,20 @@ def selected_host(layout):
 def selected_hosts(layout):
     first=selected_host(layout)
     second=layout.get('secondUploadHost','')
-    if second not in ('','streamtape','streamhg','abyss','telegram'):
-        raise ValueError('Choose a valid second upload host')
-    if second==first:
-        raise ValueError('Choose two different upload hosts')
-    return [first,second] if second else [first]
+    third=layout.get('thirdUploadHost','')
+    fourth=layout.get('fourthUploadHost','')
+    valid=('','streamtape','streamhg','abyss','telegram')
+    for h in (second,third,fourth):
+        if h not in valid:raise ValueError('Choose a valid upload host')
+    chosen=[first]
+    for h in (second,third,fourth):
+        if h:
+            if h in chosen:raise ValueError('Choose different upload hosts')
+            chosen.append(h)
+    return chosen
 
 
-def merge_provider_mapping(rows,identity,file_id,provider='streamtape'):
+def merge_provider_mapping(rows,identity,file_id,provider='streamtape',quality_ids=None):
     if provider not in ('streamtape','streamhg','abyss','telegram') or not isinstance(file_id,str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}',file_id):raise ValueError('Invalid host or video ID')
     if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):raise ValueError('Invalid mappings')
     key=('mal_id' if 'mal_id' in identity else 'anilist_id') if identity['type']=='anime' else 'tmdb_id'
@@ -32,7 +38,18 @@ def merge_provider_mapping(rows,identity,file_id,provider='streamtape'):
         if row.get('abyss_id') and 'abyss' not in providers:providers['abyss']={'file_id':row['abyss_id']}
         if row.get('streamhg_id') and 'streamhg' not in providers:providers['streamhg']={'file_id':row['streamhg_id']}
         if row.get('telegram_id') and 'telegram' not in providers:providers['telegram']={'file_id':row['telegram_id']}
-    providers[provider]={'file_id':file_id}
+    entry={'file_id':file_id}
+    if provider=='telegram':
+        if '-' in file_id:
+            entry['parts']=[p for p in file_id.split('-') if p.isdigit()]
+        if quality_ids and isinstance(quality_ids,dict):
+            entry['qualities']={}
+            for q,qid in quality_ids.items():
+                q_ent={'file_id':qid}
+                if '-' in qid:
+                    q_ent['parts']=[p for p in qid.split('-') if p.isdigit()]
+                entry['qualities'][q]=q_ent
+    providers[provider]=entry
     item=dict(identity,provider=provider,providers=providers)
     if 'streamtape' in providers:item['file_id']=providers['streamtape']['file_id']
     if 'abyss' in providers:item['abyss_id']=providers['abyss']['file_id']
@@ -179,23 +196,16 @@ def verify_abyss(file_id,key,size,name,attempts=6,pause=time.sleep):
 
 
 
-def upload_telegram(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run):
+def get_media_duration(path, run=subprocess.run):
+    try:
+        res = run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', str(path)], capture_output=True, text=True, timeout=30)
+        return float(res.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, mask, run):
     size = file_size(path)
-    if size > 2000 * 1024 * 1024:
-        raise HostError('Telegram file limit exceeded: video file exceeds the 2000MB (2GB) Telegram limit. Re-encode with higher CRF or lower bitrate.')
-
-    if not bot_token or not re.fullmatch(r'\d{8,12}:[A-Za-z0-9_-]{30,45}', bot_token):
-        raise HostError('Telegram configuration: TELEGRAM_BOT_TOKEN is missing or invalid format.')
-    chat_str = str(chat_id).strip()
-    if not chat_str or not re.fullmatch(r'-?\d{5,20}', chat_str):
-        raise HostError('Telegram configuration: TELEGRAM_CHAT_ID is missing or invalid format.')
-    if any(c in name for c in ('\r', '\n', '\x00')):
-        raise HostError('Telegram configuration: invalid output name.')
-    mask(bot_token)
-    mask(chat_str)
-    if api_hash:
-        mask(str(api_hash))
-
     if size >= 50 * 1024 * 1024 and api_id and api_hash:
         try:
             import asyncio
@@ -250,7 +260,123 @@ def upload_telegram(path, name, bot_token, chat_id, api_id=None, api_hash=None, 
     return str(msg_id)
 
 
+def upload_telegram(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run):
+    if not bot_token or not re.fullmatch(r'\d{8,12}:[A-Za-z0-9_-]{30,45}', bot_token):
+        raise HostError('Telegram configuration: TELEGRAM_BOT_TOKEN is missing or invalid format.')
+    chat_str = str(chat_id).strip()
+    if not chat_str or not re.fullmatch(r'-?\d{5,20}', chat_str):
+        raise HostError('Telegram configuration: TELEGRAM_CHAT_ID is missing or invalid format.')
+    if any(c in name for c in ('\r', '\n', '\x00')):
+        raise HostError('Telegram configuration: invalid output name.')
+    mask(bot_token)
+    mask(chat_str)
+    if api_hash:
+        mask(str(api_hash))
+
+    size = file_size(path)
+    part_limit = 1950 * 1024 * 1024  # 1950MB safe boundary below 2000MB
+
+    if size > part_limit:
+        import math, tempfile
+        from pathlib import Path
+        num_parts = math.ceil(size / part_limit)
+        print(f"Telegram file size is {round(size / (1024 * 1024), 1)}MB (>2000MB). Automatically splitting into {num_parts} parts.", flush=True)
+
+        total_duration = get_media_duration(path, run=run)
+        if total_duration <= 0:
+            total_duration = 7200.0  # fallback assumption 2 hours if probe unreadable
+
+        part_duration = total_duration / num_parts
+        part_ids = []
+        base_name = name.removesuffix('.mp4')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(num_parts):
+                part_path = Path(tmpdir) / f"{base_name}.part{i+1}.mp4"
+                start_sec = i * part_duration
+                cmd = [
+                    'ffmpeg', '-y', '-ss', str(start_sec), '-i', str(path),
+                    '-t', str(part_duration), '-c', 'copy', '-map', '0',
+                    '-movflags', '+faststart', str(part_path)
+                ]
+                print(f"Splitting part {i+1} of {num_parts} (starts at {round(start_sec, 1)}s)...", flush=True)
+                res = run(cmd, capture_output=True)
+                if res.returncode != 0:
+                    raise HostError(f"FFmpeg split failed on part {i+1}.")
+
+                part_name = f"{base_name} - Part {i+1}.mp4"
+                print(f"Uploading part {i+1} of {num_parts} to Telegram...", flush=True)
+                p_id = _upload_telegram_single(part_path, part_name, bot_token, chat_str, api_id, api_hash, mask, run)
+                part_ids.append(p_id)
+
+        combined_id = "-".join(part_ids)
+        print(f"All {num_parts} parts uploaded to Telegram: {combined_id}", flush=True)
+        return combined_id
+
+    return _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, mask, run)
+
+
 def verify_telegram(file_id, key, size, name, attempts=6, pause=time.sleep):
-    if isinstance(file_id, (str, int)) and str(file_id).isdigit():
-        return True, True
+    if isinstance(file_id, (str, int)):
+        parts = str(file_id).split('-')
+        if all(p.isdigit() for p in parts):
+            return True, True
     return False, False
+
+
+def get_video_dimensions(path, run=subprocess.run):
+    try:
+        res = run(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', str(path)], capture_output=True, text=True, timeout=30)
+        w, h = res.stdout.strip().split('x')
+        return int(w), int(h)
+    except Exception:
+        return 1280, 720
+
+
+def transcode_resolution(input_path, output_path, target_height, run=subprocess.run):
+    vf = f"scale=-2:{target_height}"
+    crf = "22" if target_height >= 720 else "23"
+    cmd = [
+        'ffmpeg', '-y', '-i', str(input_path),
+        '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', crf,
+        '-c:a', 'copy', '-movflags', '+faststart', str(output_path)
+    ]
+    res = run(cmd, capture_output=True)
+    if res.returncode != 0:
+        raise HostError(f"Transcoding to {target_height}p failed.")
+
+
+def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run):
+    w, h = get_video_dimensions(path, run=run)
+    base_name = name.removesuffix('.mp4')
+    quality_ids = {}
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        if h >= 900:
+            targets = [('1080p', None), ('720p', 720), ('480p', 480)]
+        elif h >= 600:
+            targets = [('720p', None), ('480p', 480)]
+        else:
+            targets = [('480p', None)]
+
+        primary_id = None
+        for q_name, target_h in targets:
+            if target_h is None:
+                q_path = path
+                q_file_name = f"{base_name} [{q_name}].mp4"
+            else:
+                q_path = Path(tmpdir) / f"{base_name}_{q_name}.mp4"
+                print(f"Transcoding {base_name} to {q_name}...", flush=True)
+                transcode_resolution(path, q_path, target_h, run=run)
+                q_file_name = f"{base_name} [{q_name}].mp4"
+
+            print(f"Uploading {q_name} version to Telegram...", flush=True)
+            res_id = upload_telegram(q_path, q_file_name, bot_token, chat_id, api_id, api_hash, mask, run=run)
+            quality_ids[q_name] = res_id
+            if primary_id is None:
+                primary_id = res_id
+
+    return primary_id, quality_ids
