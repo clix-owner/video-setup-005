@@ -361,9 +361,21 @@ def get_video_dimensions(path, run=subprocess.run):
 def transcode_resolution(input_path, output_path, target_height, run=subprocess.run):
     vf = f"scale=-2:{target_height}"
     crf = "22" if target_height >= 720 else "23"
+    duration = get_media_duration(input_path, run=run)
+    extra_flags = []
+    if duration > 0:
+        safe_kbps = int((1900 * 8192) / duration)
+        if target_height >= 1080:
+            cap_kbps = min(2800, safe_kbps)
+        elif target_height >= 720:
+            cap_kbps = min(1600, safe_kbps)
+        else:
+            cap_kbps = min(800, safe_kbps)
+        extra_flags = ['-maxrate', f'{cap_kbps}k', '-bufsize', f'{cap_kbps * 2}k']
     cmd = [
         'ffmpeg', '-y', '-i', str(input_path),
-        '-vf', vf, '-c:v', 'libx264', '-preset', 'superfast', '-crf', crf, '-sws_flags', 'fast_bilinear',
+        '-vf', vf, '-c:v', 'libx264', '-preset', 'superfast', '-crf', crf,
+        *extra_flags, '-sws_flags', 'fast_bilinear',
         '-c:a', 'copy', '-movflags', '+faststart', str(output_path)
     ]
     res = run(cmd, capture_output=True)
