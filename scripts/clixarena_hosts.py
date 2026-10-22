@@ -410,16 +410,29 @@ def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=
         part_limit = 1950 * 1024 * 1024
 
         primary_id = None
+        prev_720p_path = None
         for q_name, target_h in targets:
             need_transcode = (target_h is not None) or (orig_size > part_limit)
             if not need_transcode:
                 q_path = path
                 q_file_name = f"{base_name} [{q_name}].mp4"
+                if q_name == '720p':
+                    prev_720p_path = path
             else:
                 h_to_use = target_h if target_h is not None else min(h, 1080)
                 q_path = Path(tmpdir) / f"{base_name}_{q_name}.mp4"
-                print(f"Bitrate Guard Active: Transcoding {base_name} to {q_name} ({h_to_use}p) to guarantee file < 1950MB...", flush=True)
-                transcode_resolution(path, q_path, h_to_use, run=run)
+                
+                source_video = path
+                if q_name == '480p' and prev_720p_path and prev_720p_path.exists():
+                    source_video = prev_720p_path
+                    print(f"Cascading Speedup: Transcoding {base_name} 480p directly from 720p source...", flush=True)
+                else:
+                    msg = "Bitrate Guard Active: Transcoding" if target_h is None else "Transcoding"
+                    print(f"{msg} {base_name} to {q_name} ({h_to_use}p)...", flush=True)
+
+                transcode_resolution(source_video, q_path, h_to_use, run=run)
+                if q_name == '720p':
+                    prev_720p_path = q_path
                 q_file_name = f"{base_name} [{q_name}].mp4"
 
             print(f"Uploading {q_name} version to Telegram...", flush=True)
