@@ -199,33 +199,34 @@ class TelegramHostTests(unittest.TestCase):
         uploaded = []
         def fake_upload(p, name, token, chat, *args, **kwargs):
             uploaded.append(name)
-            return 'msg-' + name.split('[')[1].split(']')[0]
+            return {'file_id': 'msg-' + name.split('[')[1].split(']')[0]}
 
         path = SimpleNamespace(stat=lambda: SimpleNamespace(st_size=1024))
         with patch.object(hosts, 'get_video_dimensions', return_value=(1920, 1080)), \
              patch.object(hosts, 'transcode_resolution', lambda *a, **k: None), \
-             patch.object(hosts, 'upload_telegram', side_effect=fake_upload):
+             patch.object(hosts, 'upload_telegram_hls', side_effect=fake_upload):
             primary, q_ids = hosts.upload_telegram_multi(path, 'Movie.mp4', '123456789:ABCdefGHIjklMNOpqrsTUVwxyz12345678', '-1001234567890')
 
         self.assertEqual(primary, 'msg-1080p')
-        self.assertEqual(q_ids, {'1080p': 'msg-1080p', '720p': 'msg-720p', '480p': 'msg-480p'})
+        self.assertEqual({q: e['file_id'] for q,e in q_ids.items()}, {'1080p': 'msg-1080p', '720p': 'msg-720p', '480p': 'msg-480p'})
         self.assertEqual(uploaded, ['Movie [1080p].mp4', 'Movie [720p].mp4', 'Movie [480p].mp4'])
 
     def test_upload_telegram_multi_resolution_720p_creates_two_resolutions(self):
         uploaded = []
         def fake_upload(p, name, token, chat, *args, **kwargs):
             uploaded.append(name)
-            return 'msg-' + name.split('[')[1].split(']')[0]
+            return {'file_id': 'msg-' + name.split('[')[1].split(']')[0]}
 
         path = SimpleNamespace(stat=lambda: SimpleNamespace(st_size=1024))
         with patch.object(hosts, 'get_video_dimensions', return_value=(1280, 720)), \
              patch.object(hosts, 'transcode_resolution', lambda *a, **k: None), \
-             patch.object(hosts, 'upload_telegram', side_effect=fake_upload):
+             patch.object(hosts, 'upload_telegram_hls', side_effect=fake_upload):
             primary, q_ids = hosts.upload_telegram_multi(path, 'Movie.mp4', '123456789:ABCdefGHIjklMNOpqrsTUVwxyz12345678', '-1001234567890')
 
         self.assertEqual(primary, 'msg-720p')
-        self.assertEqual(q_ids, {'720p': 'msg-720p', '480p': 'msg-480p'})
+        self.assertEqual({q: e['file_id'] for q,e in q_ids.items()}, {'720p': 'msg-720p', '480p': 'msg-480p'})
         self.assertEqual(uploaded, ['Movie [720p].mp4', 'Movie [480p].mp4'])
 
 if __name__ == '__main__':
     unittest.main()
+

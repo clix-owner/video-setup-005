@@ -80,7 +80,7 @@ def run_standalone_telegram():
         )
 
         print(f"✅ All resolutions uploaded to Telegram! Primary ID: {primary_id}", flush=True)
-        print(f"📊 Quality map: {json.dumps(quality_ids)}", flush=True)
+        print(f"📊 Quality map: {json.dumps({q: entry.get('file_id') if isinstance(entry, dict) else entry for q, entry in quality_ids.items()})}", flush=True)
 
         if tmdb_id_str and tmdb_id_str.isdigit():
             tmdb_id = int(tmdb_id_str)
@@ -116,3 +116,4 @@ def run_standalone_telegram():
 
 if __name__ == "__main__":
     sys.exit(run_standalone_telegram())
+

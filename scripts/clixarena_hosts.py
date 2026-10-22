@@ -45,9 +45,15 @@ def merge_provider_mapping(rows,identity,file_id,provider='streamtape',quality_i
         if quality_ids and isinstance(quality_ids,dict):
             entry['qualities']={}
             for q,qid in quality_ids.items():
-                q_ent={'file_id':qid}
-                if '-' in qid:
-                    q_ent['parts']=[p for p in qid.split('-') if p.isdigit()]
+                if isinstance(qid,dict):
+                    q_ent=json.loads(json.dumps(qid))
+                    if not isinstance(q_ent.get('file_id'),str):raise ValueError('Invalid Telegram quality mapping')
+                else:
+                    q_ent={'file_id':qid}
+                    if '-' in qid:q_ent['parts']=[p for p in qid.split('-') if p.isdigit()]
+                if q_ent['file_id']==file_id and q_ent.get('hls'):
+                    entry['hls']=q_ent['hls']
+                    entry['parts']=q_ent['parts']
                 entry['qualities'][q]=q_ent
     providers[provider]=entry
     item=dict(identity,provider=provider,providers=providers)
@@ -205,6 +211,7 @@ def get_media_duration(path, run=subprocess.run):
 
 
 def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, mask, run):
+    is_document = str(path).lower().endswith('.ts')
     size = file_size(path)
     # Channel ID normalization for Telegram supergroups/channels
     chat_str = str(chat_str).strip()
@@ -253,6 +260,10 @@ def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, m
 
             async def _send():
                 async with Client("uploader", api_id=int(api_id), api_hash=str(api_hash), bot_token=str(bot_token), in_memory=True, workers=8) as app:
+                    if is_document:
+                        msg = await app.send_document(chat_id=int(chat_str), document=str(path),
+                                                      caption=name, file_name=name, progress=upload_progress)
+                        return str(msg.id)
                     msg = await app.send_video(
                         chat_id=int(chat_str),
                         video=str(path),
@@ -266,18 +277,20 @@ def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, m
         except Exception as e:
             raise HostError('Telegram Pyrogram upload failed: ' + str(e) + '. Check bot permissions in storage channel.') from None
 
-    url = 'https://api.telegram.org/bot' + bot_token + '/sendVideo'
+    url = 'https://api.telegram.org/bot' + bot_token + ('/sendDocument' if is_document else '/sendVideo')
     mask(url)
     quote = lambda v: v.replace('\\', '\\\\').replace('"', '\\"').replace('\r', '').replace('\n', '')
     filename = quote(name)
     local = quote(str(path))
     config = 'url = "' + quote(url) + '"\nform-string = "chat_id=' + quote(chat_str) + '"\nform-string = "supports_streaming=true"\nform-string = "caption=' + quote(name) + '"\n'
+    if is_document:
+        config = config.replace('form-string = \"supports_streaming=true\"\n', '')
     try:
         response = run_upload([
             'curl', '--config', '-', '--silent', '--fail', '--proto', '=https',
             '--connect-timeout', '30', '--max-time', '3600',
             '--write-out', '\nCLIXARENA_HTTP:%{http_code}',
-            '--form', 'video=@"' + local + '";filename="' + filename + '"'
+            '--form', ('document=@"' if is_document else 'video=@"') + local + '";filename="' + filename + '"'
         ], input=config, capture_output=True, text=True, timeout=3610, runner=run, label='Telegram', size=size)
     except subprocess.TimeoutExpired:
         raise HostError('Telegram file upload: timed out. Check storage channel before retrying.') from None
@@ -443,6 +456,22 @@ def transcode_resolution(input_path, output_path, target_height, run=subprocess.
         raise HostError(f"Transcoding to {target_height}p failed: {e}")
 
 
+def upload_telegram_hls(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run):
+    from clixarena_hls import upload_hls
+    if not bot_token or not re.fullmatch(r'\d{8,12}:[A-Za-z0-9_-]{30,45}', bot_token):
+        raise HostError('Telegram bot token is invalid')
+    if not re.fullmatch(r'-?\d{5,20}',str(chat_id).strip()):
+        raise HostError('Telegram chat ID is invalid')
+    mask(bot_token)
+    mask(str(chat_id))
+    if api_hash:mask(str(api_hash))
+    try:
+        return upload_hls(path, name, lambda bundle, label: _upload_telegram_single(
+            bundle, label, bot_token, str(chat_id), api_id, api_hash, mask, run), run=run)
+    except ValueError as error:
+        raise HostError(str(error)) from error
+
+
 def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run, mode='multi'):
     w, h = get_video_dimensions(path, run=run)
     base_name = name.removesuffix('.mp4')
@@ -451,8 +480,9 @@ def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=
     if mode == 'single':
         q_name = '1080p' if h >= 900 else ('720p' if h >= 600 else '480p')
         print(f"Uploading single quality ({q_name}) video to Telegram...", flush=True)
-        res_id = upload_telegram(path, name, bot_token, chat_id, api_id, api_hash, mask, run=run)
-        quality_ids[q_name] = res_id
+        entry = upload_telegram_hls(path, name, bot_token, chat_id, api_id, api_hash, mask, run=run)
+        quality_ids[q_name] = entry
+        res_id = entry['file_id']
         return res_id, quality_ids
 
     import tempfile
@@ -466,38 +496,20 @@ def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=
         else:
             targets = [('480p', None)]
 
-        orig_size = file_size(path)
-        part_limit = 1950 * 1024 * 1024
-
         primary_id = None
-        prev_720p_path = None
         for q_name, target_h in targets:
-            need_transcode = (target_h is not None) or (orig_size > part_limit)
-            if not need_transcode:
+            q_file_name = f"{base_name} [{q_name}].mp4"
+            if target_h is None:
                 q_path = path
-                q_file_name = f"{base_name} [{q_name}].mp4"
-                if q_name == '720p':
-                    prev_720p_path = path
             else:
-                h_to_use = target_h if target_h is not None else min(h, 1080)
                 q_path = Path(tmpdir) / f"{base_name}_{q_name}.mp4"
-                
-                source_video = path
-                if q_name == '480p' and prev_720p_path and prev_720p_path.exists():
-                    source_video = prev_720p_path
-                    print(f"Cascading Speedup: Transcoding {base_name} 480p directly from 720p source...", flush=True)
-                else:
-                    msg = "Bitrate Guard Active: Transcoding" if target_h is None else "Transcoding"
-                    print(f"{msg} {base_name} to {q_name} ({h_to_use}p)...", flush=True)
-
-                transcode_resolution(source_video, q_path, h_to_use, run=run)
-                if q_name == '720p':
-                    prev_720p_path = q_path
-                q_file_name = f"{base_name} [{q_name}].mp4"
+                print(f"Creating {q_name} from the original input...", flush=True)
+                transcode_resolution(path, q_path, target_h, run=run)
 
             print(f"Uploading {q_name} version to Telegram...", flush=True)
-            res_id = upload_telegram(q_path, q_file_name, bot_token, chat_id, api_id, api_hash, mask, run=run)
-            quality_ids[q_name] = res_id
+            entry = upload_telegram_hls(q_path, q_file_name, bot_token, chat_id, api_id, api_hash, mask, run=run)
+            quality_ids[q_name] = entry
+            res_id = entry['file_id']
             if primary_id is None:
                 primary_id = res_id
 
