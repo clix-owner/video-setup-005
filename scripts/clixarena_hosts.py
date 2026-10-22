@@ -406,15 +406,20 @@ def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=
         else:
             targets = [('480p', None)]
 
+        orig_size = file_size(path)
+        part_limit = 1950 * 1024 * 1024
+
         primary_id = None
         for q_name, target_h in targets:
-            if target_h is None:
+            need_transcode = (target_h is not None) or (orig_size > part_limit)
+            if not need_transcode:
                 q_path = path
                 q_file_name = f"{base_name} [{q_name}].mp4"
             else:
+                h_to_use = target_h if target_h is not None else min(h, 1080)
                 q_path = Path(tmpdir) / f"{base_name}_{q_name}.mp4"
-                print(f"Transcoding {base_name} to {q_name}...", flush=True)
-                transcode_resolution(path, q_path, target_h, run=run)
+                print(f"Bitrate Guard Active: Transcoding {base_name} to {q_name} ({h_to_use}p) to guarantee file < 1950MB...", flush=True)
+                transcode_resolution(path, q_path, h_to_use, run=run)
                 q_file_name = f"{base_name} [{q_name}].mp4"
 
             print(f"Uploading {q_name} version to Telegram...", flush=True)
