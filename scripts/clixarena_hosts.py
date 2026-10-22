@@ -235,9 +235,32 @@ def _upload_telegram_single(path, name, bot_token, chat_str, api_id, api_hash, m
                     return 'chat'
             utils.get_peer_type = _patch_peer_type
 
+            last_log_time = 0
+            start_upload_time = time.time()
+            def upload_progress(current, total):
+                nonlocal last_log_time
+                now = time.time()
+                if now - last_log_time >= 5 or current == total:
+                    last_log_time = now
+                    pct = (current / total) * 100 if total else 0
+                    elapsed = now - start_upload_time
+                    speed = (current / elapsed) / (1024 * 1024) if elapsed > 0 else 0
+                    curr_mb = current / (1024 * 1024)
+                    tot_mb = total / (1024 * 1024)
+                    eta_sec = (total - current) / (current / elapsed) if current > 0 and elapsed > 0 else 0
+                    eta_m, eta_s = divmod(int(eta_sec), 60)
+                    print(f"Telegram Uploading [{name}]: {pct:5.1f}% | {curr_mb:6.1f}MB / {tot_mb:6.1f}MB | {speed:4.1f} MB/s | ETA {eta_m}m {eta_s:02d}s", flush=True)
+
             async def _send():
                 async with Client("uploader", api_id=int(api_id), api_hash=str(api_hash), bot_token=str(bot_token), in_memory=True, workers=8) as app:
-                    msg = await app.send_video(chat_id=int(chat_str), video=str(path), caption=name, file_name=name, supports_streaming=True)
+                    msg = await app.send_video(
+                        chat_id=int(chat_str),
+                        video=str(path),
+                        caption=name,
+                        file_name=name,
+                        supports_streaming=True,
+                        progress=upload_progress
+                    )
                     return str(msg.id)
             return asyncio.run(_send())
         except Exception as e:
@@ -299,7 +322,7 @@ def upload_telegram(path, name, bot_token, chat_id, api_id=None, api_hash=None, 
         mask(str(api_hash))
 
     size = file_size(path)
-    part_limit = 1950 * 1024 * 1024  # 1950MB safe boundary below 2000MB
+    part_limit = 1995 * 1024 * 1024  # 1995MB safe boundary below 2000MB Telegram limit
 
     if size > part_limit:
         import math, tempfile
@@ -364,23 +387,60 @@ def transcode_resolution(input_path, output_path, target_height, run=subprocess.
     duration = get_media_duration(input_path, run=run)
     extra_flags = []
     if duration > 0:
-        safe_kbps = int((1900 * 8192) / duration)
+        # Budget total file for 1750MB (video + audio + container) to guarantee file stays well below Telegram 1950MB limit
+        total_kbps = int((1750 * 8192) / duration)
+        safe_video_kbps = max(250, total_kbps - 220)
         if target_height >= 1080:
-            cap_kbps = min(2800, safe_kbps)
+            cap_kbps = min(2400, safe_video_kbps)
+            crf = "23"
         elif target_height >= 720:
-            cap_kbps = min(1600, safe_kbps)
+            cap_kbps = min(1400, safe_video_kbps)
+            crf = "23"
         else:
-            cap_kbps = min(800, safe_kbps)
+            cap_kbps = min(750, safe_video_kbps)
+            crf = "24"
         extra_flags = ['-maxrate', f'{cap_kbps}k', '-bufsize', f'{cap_kbps * 2}k']
     cmd = [
-        'ffmpeg', '-y', '-i', str(input_path),
+        'ffmpeg', '-y', '-threads', '0', '-progress', 'pipe:1', '-nostats',
+        '-i', str(input_path),
         '-vf', vf, '-c:v', 'libx264', '-preset', 'superfast', '-crf', crf,
         *extra_flags, '-sws_flags', 'fast_bilinear',
         '-c:a', 'copy', '-movflags', '+faststart', str(output_path)
     ]
-    res = run(cmd, capture_output=True)
-    if res.returncode != 0:
-        raise HostError(f"Transcoding to {target_height}p failed.")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        last_log = 0
+        t0 = time.time()
+        speed = '1.0x'
+        while True:
+            line = proc.stdout.readline()
+            if not line and proc.poll() is not None:
+                break
+            line = line.strip()
+            if line.startswith('speed='):
+                speed = line.split('=')[1].strip()
+            elif line.startswith('out_time_ms='):
+                try:
+                    out_ms = int(line.split('=')[1].strip())
+                    curr_sec = out_ms / 1_000_000.0
+                    now = time.time()
+                    if now - last_log >= 5 or (duration > 0 and curr_sec >= duration):
+                        last_log = now
+                        pct = min(100.0, (curr_sec / duration) * 100.0) if duration > 0 else 0
+                        elapsed = now - t0
+                        eta_sec = (duration - curr_sec) / (curr_sec / elapsed) if curr_sec > 0 and elapsed > 0 else 0
+                        eta_m, eta_s = divmod(int(eta_sec), 60)
+                        print(f"Transcoding {target_height}p: {pct:5.1f}% | speed={speed} | elapsed={int(elapsed)}s | ETA {eta_m}m {eta_s:02d}s", flush=True)
+                except Exception:
+                    pass
+        ret = proc.wait()
+        if ret != 0:
+            stderr_out = proc.stderr.read()
+            raise HostError(f"Transcoding to {target_height}p failed (code {ret}): {stderr_out[-300:]}")
+    except Exception as e:
+        if isinstance(e, HostError):
+            raise
+        raise HostError(f"Transcoding to {target_height}p failed: {e}")
 
 
 def upload_telegram_multi(path, name, bot_token, chat_id, api_id=None, api_hash=None, mask=lambda _:None, run=subprocess.run, mode='multi'):
