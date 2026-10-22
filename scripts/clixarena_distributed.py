@@ -212,14 +212,7 @@ def worker(index):
             filters=f'scale={cw}:{ch},setsar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setpts=PTS-STARTPTS'
             args+=['-map','0:v:0','-vf',filters]
         args+=['-an','-sn','-dn','-c:v','libx264','-preset',data['preset'],'-crf',str(data['crf']),'-pix_fmt','yuv420p','-fps_mode','passthrough','-map_metadata','-1']
-        dur = data.get('duration', 0)
-        if dur > 0:
-            total_kbps = int((1700 * 8192) / dur)
-            safe_kbps = max(250, total_kbps - 220)
-            h_val = data.get('height', 720)
-            cap_kbps = min(2400 if h_val >= 1080 else (1400 if h_val >= 720 else 750), safe_kbps)
-            args += ['-maxrate', f'{cap_kbps}k', '-bufsize', f'{cap_kbps * 2}k']
-            print(f'Parallel Runner Bitrate Guard Active: Capping chunk {index+1} at {cap_kbps}kbps to ensure total merged movie < 1750MB', flush=True)
+# Pure CRF master encoding: No artificial bitrate capping
         print(f'Encoding {data.get("method","soft")} chunk {index+1} of {data["count"]}',flush=True)
         encode_progress(args,float(metadata['format']['duration']),output=target)
     finally:os.chdir(previous)
